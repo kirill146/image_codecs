@@ -1,0 +1,11 @@
+[package]
+name = "image_codecs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+num-traits = "0.2.19"
+
+[dev-dependencies]
+image = "0.25.9"
+walkdir = "2"
