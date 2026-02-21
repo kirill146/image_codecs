@@ -239,14 +239,20 @@ impl<'a> PNGDatastream<'a> {
 }
 
 
-fn paeth_predictor<T: num_traits::AsPrimitive<i32>>(a: T, b: T, c: T) -> T {
-    let a32 = a.as_();
-    let b32 = b.as_();
-    let c32 = c.as_();
+fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
+    let a32 = a as i32;
+    let b32 = b as i32;
+    let c32 = c as i32;
+
     let p = a32 + b32 - c32;
     let pa = (p - a32).abs();
     let pb = (p - b32).abs();
     let pc = (p - c32).abs();
+
+    // let pa = (b32 - c32).abs();
+    // let pb = (a32 - c32).abs();
+    // let pc = (a32 + b32 - c32 * 2).abs();
+
     if pa <= pb && pa <= pc {
         a
     } else if pb <= pc {
@@ -256,19 +262,16 @@ fn paeth_predictor<T: num_traits::AsPrimitive<i32>>(a: T, b: T, c: T) -> T {
     }
 }
 
-fn defilter<T>(filter: Filter, a: T, b: T, c: T, filtered: T) -> T
-where
-    T: Copy + num_traits::AsPrimitive<i32> + num_traits::FromPrimitive + num_traits::ops::wrapping::WrappingAdd
-{
+fn defilter(filter: Filter, a: u8, b: u8, c: u8, filtered: u8) -> u8 {
     match filter {
         Filter::None => filtered,
-        Filter::Sub => filtered.wrapping_add(&a),
-        Filter::Up => filtered.wrapping_add(&b),
+        Filter::Sub => filtered.wrapping_add(a),
+        Filter::Up => filtered.wrapping_add(b),
         Filter::Average => {
-            let avg = (a.as_() + b.as_()) / 2;
-            filtered.wrapping_add(&T::from_i32(avg).unwrap())
+            let avg = (a as u32 + b as u32) / 2;
+            filtered.wrapping_add(avg as u8)
         },
-        Filter::Paeth => filtered.wrapping_add(&paeth_predictor(a, b, c)),
+        Filter::Paeth => filtered.wrapping_add(paeth_predictor(a, b, c)),
     }
 }
 
