@@ -328,23 +328,13 @@ impl PNGReconstructor {
         let bpc = (png_image.image.depth / 8) as usize; // bytes per channel
 
         for i in 0..self.cur_consumable_bytes {
-            let a =
+            let b = self.scanline_bufs[1 - self.cur_scanline_id][i];
+            let (a, c) =
                 if i < bpp_in {
-                    0
+                    (0, 0)
                 } else {
-                    self.scanline_bufs[self.cur_scanline_id][i - bpp_in]
-                };
-            let b =
-                if self.y == START_Y[self.pass_id] {
-                    0
-                } else {
-                    self.scanline_bufs[1 - self.cur_scanline_id][i]
-                };
-            let c =
-                if i < bpp_in || self.y == START_Y[self.pass_id] {
-                    0
-                } else {
-                    self.scanline_bufs[1 - self.cur_scanline_id][i - bpp_in]
+                    (self.scanline_bufs[self.cur_scanline_id][i - bpp_in],
+                    self.scanline_bufs[1 - self.cur_scanline_id][i - bpp_in])
                 };
 
             let defiltered = defilter(self.filter.unwrap(), a, b, c, self.scanline_bufs[self.cur_scanline_id][i]);
@@ -430,6 +420,11 @@ impl PNGReconstructor {
                 } else {
                     break;
                 }
+            }
+            if self.pass_id < 8 {
+                let scanline_pixels = (png_image.image.w + STEP_X[self.pass_id] - START_X[self.pass_id] - 1) / STEP_X[self.pass_id];
+                self.cur_consumable_bytes = (scanline_pixels as usize * png_channels * png_image.image.depth as usize + 7) / 8;
+                self.scanline_bufs[1 - self.cur_scanline_id][0..self.cur_consumable_bytes].fill(0);
             }
         }
 
