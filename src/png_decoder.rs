@@ -85,7 +85,8 @@ struct PNGReconstructor {
     pass_id: usize, // 0: non-interlaced, 1..7: interlaced
     scanline_bufs: [Vec<u8>; 2], // 0 - prev, 1 - cur
     cur_consumable_bytes: usize,
-    cur_scanline_cursor: usize,
+    cur_scanline_cursor: *mut u8,
+    cur_scanline_end: *mut u8,
 }
 
 impl Palette {
@@ -401,7 +402,8 @@ impl PNGReconstructor {
             
             let scanline_pixels = (png_image.image.w + STEP_X[self.pass_id] - START_X[self.pass_id] - 1) / STEP_X[self.pass_id];
             self.cur_consumable_bytes = (scanline_pixels as usize * png_channels * png_image.image.depth as usize + 7) / 8;
-            self.cur_scanline_cursor = 0;
+            self.cur_scanline_cursor = self.scanline_bufs[1].as_mut_ptr();
+            unsafe { self.cur_scanline_end = self.cur_scanline_cursor.add(self.cur_consumable_bytes) }
 
             return Ok(());
         }
@@ -504,9 +506,10 @@ impl PNGReconstructor {
 
         self.y += STEP_Y[self.pass_id];
         self.filter = None;
-        self.cur_scanline_cursor = 0;
         self.cur_consumable_bytes = 1; // filter type
         self.scanline_bufs.swap(0, 1);
+        self.cur_scanline_cursor = self.scanline_bufs[1].as_mut_ptr();
+        unsafe { self.cur_scanline_end = self.cur_scanline_cursor.add(1) }
 
         if png_image.interlaced {
             while START_X[self.pass_id] >= png_image.image.w || self.y >= png_image.image.h {
@@ -532,10 +535,15 @@ impl PNGReconstructor {
         //     println!("byte: {byte}");
         // }
 
-        self.scanline_bufs[1][self.cur_scanline_cursor] = byte;
-        self.cur_scanline_cursor += 1;
-
-        if self.cur_scanline_cursor != self.cur_consumable_bytes {
+        // self.scanline_bufs[1][self.cur_scanline_cursor] = byte;
+        if unsafe {
+            // debug_assert!(self.cur_scanline_cursor < self.scanline_bufs[1].len());
+            // *self.scanline_bufs[1].get_unchecked_mut(self.cur_scanline_cursor) = byte;
+            
+            *self.cur_scanline_cursor = byte;
+            self.cur_scanline_cursor = self.cur_scanline_cursor.add(1);
+            self.cur_scanline_cursor != self.cur_scanline_end // if self.cur_scanline_cursor != self.cur_consumable_bytes { ... }
+        } {
             Ok(()) // fast path
         } else {
             self.process_scanline(png_image) // slow path
@@ -746,6 +754,8 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
         };
     reconstructor.scanline_bufs = [ vec![0; bytes_per_scanline], vec![0; bytes_per_scanline] ];
     reconstructor.cur_consumable_bytes = 1; // filter type
+    reconstructor.cur_scanline_cursor = reconstructor.scanline_bufs[1].as_mut_ptr();
+    unsafe { reconstructor.cur_scanline_end = reconstructor.cur_scanline_cursor.add(1) }
 
     bs.ensure(stream, 16)?;
     let cmf = bs.read(8);
