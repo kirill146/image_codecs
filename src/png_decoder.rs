@@ -530,6 +530,7 @@ impl PNGReconstructor {
         Ok(())
     }
 
+    #[inline(always)]
     fn consume_decoded_byte(&mut self, png_image: &mut PNGImage, byte: u8) -> Result<(), DecodingError> {
         // if self.y == 0 {
         //     println!("byte: {byte}");
@@ -865,8 +866,26 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                                 let len = bs.read(extra_bits as u32) as u32;
                                 len as usize + DIST_OFFSETS[(dist_code - 4) as usize] as usize
                             };
-                        let mut p = (dec_cursor + 32768 - dist) & 0x7fff;
+                        let mut p = (dec_cursor + window_size - dist) & (window_size - 1);
+
                         // println!("len {len} dist {dist}");
+
+                        // if (dec_cursor + len as usize) <= p && (p + len as usize) < window_size {
+                        //     let (dst, src) = dec_buf.split_at_mut(p);
+                        //     dst[dec_cursor..dec_cursor + len as usize].copy_from_slice(&src[0..len as usize]);
+                        //     for byte in &src[0..len as usize] {
+                        //         reconstructor.consume_decoded_byte(png_image, *byte)?;
+                        //     }
+                        //     dec_cursor += len as usize;
+                        // } else if (p + len as usize) <= dec_cursor && (dec_cursor + len as usize) < window_size {
+                        //     let (src, dst) = dec_buf.split_at_mut(dec_cursor);
+                        //     dst[0..len as usize].copy_from_slice(&src[p..p + len as usize]);
+                        //     for byte in &dst[0..len as usize] {
+                        //         reconstructor.consume_decoded_byte(png_image, *byte)?;
+                        //     }
+                        //     dec_cursor += len as usize;
+                        // } else {
+                        // slow path
                         while len > 0 {
                             let byte = dec_buf[p];
                             reconstructor.consume_decoded_byte(png_image, byte)?;
@@ -877,6 +896,7 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                             p &= window_size - 1;
                             len -= 1;
                         }
+                        // }
                     }
                 }
             },
