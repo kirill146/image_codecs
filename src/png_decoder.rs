@@ -279,8 +279,8 @@ fn defilter_sub<const BPP: usize>(cur: &mut [u8]) {
     }
 }
 
-fn defilter_up<const BPP: usize>(prev: &[u8], cur: &mut [u8]) {
-    for i in BPP..cur.len() {
+fn defilter_up(bpp: usize, prev: &[u8], cur: &mut [u8]) {
+    for i in bpp..cur.len() {
         cur[i] = cur[i].wrapping_add(prev[i]);
     }
 }
@@ -298,13 +298,73 @@ fn defilter_paeth<const BPP: usize>(prev: &[u8], cur: &mut [u8]) {
     }
 }
 
+
+fn defilter_sub_3(cur: &mut [u8]) {
+    for i in 3..cur.len() {
+        cur[i] = cur[i].wrapping_add(cur[i - 3]);
+    }
+}
+
+fn defilter_avg_3(prev: &[u8], cur: &mut [u8]) {
+    for i in 3..cur.len() {
+        let avg = (cur[i - 3] as u32 + prev[i] as u32) / 2;
+        cur[i] = cur[i].wrapping_add(avg as u8);
+    }
+}
+
+fn defilter_paeth_3(prev: &[u8], cur: &mut [u8]) {
+    for i in 3..cur.len() {
+        cur[i] = cur[i].wrapping_add(paeth_predictor(cur[i - 3], prev[i], prev[i - 3]));
+    }
+}
+
+fn defilter_sub_4(cur: &mut [u8]) {
+    for i in 4..cur.len() {
+        cur[i] = cur[i].wrapping_add(cur[i - 4]);
+    }
+}
+
+fn defilter_avg_4(prev: &[u8], cur: &mut [u8]) {
+    for i in 4..cur.len() {
+        let avg = (cur[i - 4] as u32 + prev[i] as u32) / 2;
+        cur[i] = cur[i].wrapping_add(avg as u8);
+    }
+}
+
+fn defilter_paeth_4(prev: &[u8], cur: &mut [u8]) {
+    for i in 4..cur.len() {
+        cur[i] = cur[i].wrapping_add(paeth_predictor(cur[i - 4], prev[i], prev[i - 4]));
+    }
+}
+
+
 fn defilter_scanline<const BPP: usize>(filter: Filter, prev: &[u8], cur: &mut [u8]) {
     match filter {
         Filter::None => (),
         Filter::Sub => defilter_sub::<BPP>(cur),
-        Filter::Up => defilter_up::<BPP>(prev, cur),
+        Filter::Up => defilter_up(BPP, prev, cur),
         Filter::Average => defilter_avg::<BPP>(prev, cur),
         Filter::Paeth => defilter_paeth::<BPP>(prev, cur),
+    }
+}
+
+fn defilter_scanline_3(filter: Filter, prev: &[u8], cur: &mut [u8]) {
+    match filter {
+        Filter::None => (),
+        Filter::Sub => defilter_sub_3(cur),
+        Filter::Up => defilter_up(3, prev, cur),
+        Filter::Average => defilter_avg_3(prev, cur),
+        Filter::Paeth => defilter_paeth_3(prev, cur),
+    }
+}
+
+fn defilter_scanline_4(filter: Filter, prev: &[u8], cur: &mut [u8]) {
+    match filter {
+        Filter::None => (),
+        Filter::Sub => defilter_sub_4(cur),
+        Filter::Up => defilter_up(4, prev, cur),
+        Filter::Average => defilter_avg_4(prev, cur),
+        Filter::Paeth => defilter_paeth_4(prev, cur),
     }
 }
 
@@ -365,8 +425,10 @@ impl PNGReconstructor {
         match bpp_in {
             1 => defilter_scanline::<1>(self.filter.unwrap(), prev, cur),
             2 => defilter_scanline::<2>(self.filter.unwrap(), prev, cur),
-            3 => defilter_scanline::<3>(self.filter.unwrap(), prev, cur),
-            4 => defilter_scanline::<4>(self.filter.unwrap(), prev, cur),
+            // 3 => defilter_scanline::<3>(self.filter.unwrap(), prev, cur),
+            3 => defilter_scanline_3(self.filter.unwrap(), prev, cur),
+            // 4 => defilter_scanline::<4>(self.filter.unwrap(), prev, cur),
+            4 => defilter_scanline_4(self.filter.unwrap(), prev, cur),
             6 => defilter_scanline::<6>(self.filter.unwrap(), prev, cur),
             8 => defilter_scanline::<8>(self.filter.unwrap(), prev, cur),
             _ => panic!("Unreachable")
@@ -410,11 +472,9 @@ impl PNGReconstructor {
                 }
             } else { // depth >= 8
                 let mut idx = (self.y as usize * png_image.image.w as usize + START_X[self.pass_id] as usize) * bpp_out as usize;
-                for i in (0..self.cur_consumable_bytes).step_by(png_channels * bpc) {
-                    for c in 0..png_channels * bpc {
-                        let byte = self.scanline_bufs[1][i + c];
-                        png_image.image.buf[idx + c] = byte;
-                    }
+                let pix_size = png_channels * bpc;
+                for i in (0..self.cur_consumable_bytes).step_by(pix_size) {
+                    png_image.image.buf[idx..idx + pix_size].copy_from_slice(&self.scanline_bufs[1][i..i + pix_size]);
                     if let Some(trns_alpha) = png_image.trns_alpha {
                         if png_image.image.depth == 8 {
                             let alpha =
