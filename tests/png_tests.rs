@@ -29,7 +29,7 @@ fn test_png_decoder() {
     let mut total = Duration::default();
     let mut total_ref = Duration::default();
     for path in pngs {
-        // if path.display().to_string() != "../../../Downloads/PngSuite-2017jul19\\basn3p08.png" {
+        // if path.file_name().unwrap().display().to_string() != "tm3n3p02.png" {
         //     n_skipped += 1;
         //     continue;
         // }

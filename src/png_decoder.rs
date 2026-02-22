@@ -80,14 +80,13 @@ enum Filter {
 
 #[derive(Default)]
 struct PNGReconstructor {
-    x: u32,
     y: u32,
-    channel: u32,
-    channel_byte: u32, // 0 or 1 for 16-bit color
     filter: Option<Filter>,
-    defilter_buf: Vec<u8>,
-    defilter_buf_cursor: usize,
-    pass_id: usize, // interlaced images, 0..6
+    pass_id: usize, // 0: non-interlaced, 1..7: interlaced
+    scanline_bufs: [Vec<u8>; 2],
+    cur_consumable_bytes: usize,
+    cur_scanline_id: usize,
+    cur_scanline_cursor: usize,
 }
 
 impl Palette {
@@ -285,12 +284,27 @@ const STEP_Y:  [u32; 8] = [ 1, 8, 8, 8, 4, 4, 2, 2 ];
 impl PNGReconstructor {
     fn consume_decoded_byte(&mut self, png_image: &mut PNGImage, byte: u8) -> Result<(), DecodingError> {
         // if self.y == 0 {
-        //     println!("{byte}");
+        //     println!("byte: {byte}");
         // }
+
+        // fast path
+        self.scanline_bufs[self.cur_scanline_id][self.cur_scanline_cursor] = byte;
+        self.cur_scanline_cursor += 1;
+        if self.cur_scanline_cursor != self.cur_consumable_bytes {
+            return Ok(());
+        }
+
+        // slow path (actual processing)
         if self.y >= png_image.image.h || self.pass_id >= 8 {
             return Err(DecodingError::MalformedImage);
         }
 
+        let png_channels =
+            if png_image.color_type == 3 {
+                1
+            } else {
+                png_image.image.channels as usize - png_image.trns_alpha.is_some() as usize
+            };
         if self.filter == None {
             match byte {
                 0 => self.filter = Some(Filter::None),
@@ -301,140 +315,117 @@ impl PNGReconstructor {
                 _ => return Err(DecodingError::MalformedImage)
             }
             // println!("filter: {}", byte);
+            
+            let scanline_pixels = (png_image.image.w + STEP_X[self.pass_id] - START_X[self.pass_id] - 1) / STEP_X[self.pass_id];
+            self.cur_consumable_bytes = (scanline_pixels as usize * png_channels * png_image.image.depth as usize + 7) / 8;
+            self.cur_scanline_cursor = 0;
+
             return Ok(());
         }
 
-        let bpp = (png_image.image.channels * max(png_image.image.depth, 8) as u32 / 8) as usize; // bytes per pixel
+        let bpp_out = (png_image.image.channels * max(png_image.image.depth, 8) as u32 / 8) as usize; // bytes per pixel
+        let bpp_in = if png_image.image.depth < 8 { 1 } else { bpp_out };
         let bpc = (png_image.image.depth / 8) as usize; // bytes per channel
 
-        // if let Some(gama) = png_image.gama {
-        //     sample = ((sample as f32 / 0xffff as f32).powf(1. / gama) * 0xffff as f32 + 0.5).floor() as u16;
-        // }
-        let a =
-            if self.x == START_X[self.pass_id] {
-                0
-            } else if self.defilter_buf.len() != 0 {
-                self.defilter_buf[self.defilter_buf_cursor]
-            } else {
-                let idx = (self.y as usize * png_image.image.w as usize + self.x as usize - STEP_X[self.pass_id] as usize) * bpp + self.channel as usize * bpc + self.channel_byte as usize;
-                png_image.image.buf[idx]
-                // png_image.image.buf[png_image.image.buf.len() - bpp]
-            };
-        let b =
-            if self.y == START_Y[self.pass_id] {
-                0
-            } else if self.defilter_buf.len() != 0 {
-                self.defilter_buf[(self.defilter_buf_cursor + 2) % self.defilter_buf.len()]
-            } else {
-                let idx = ((self.y - STEP_Y[self.pass_id]) as usize * png_image.image.w as usize + self.x as usize) * bpp + self.channel as usize * bpc + self.channel_byte as usize;
-                png_image.image.buf[idx]
-                // png_image.image.buf[png_image.image.buf.len() - w as usize * bpp]
-            };
-        let c =
-            if self.y == START_Y[self.pass_id] || self.x == START_X[self.pass_id] {
-                0
-            } else if self.defilter_buf.len() != 0 {
-                self.defilter_buf[(self.defilter_buf_cursor + 1) % self.defilter_buf.len()]
-            } else {
-                let idx = ((self.y - STEP_Y[self.pass_id]) as usize * png_image.image.w as usize + self.x as usize - STEP_X[self.pass_id] as usize) * bpp + self.channel as usize * bpc + self.channel_byte as usize;
-                png_image.image.buf[idx]
-                // png_image.image.buf[png_image.image.buf.len() - w as usize * bpp - bpp]
-            };
+        for i in 0..self.cur_consumable_bytes {
+            let a =
+                if i < bpp_in {
+                    0
+                } else {
+                    self.scanline_bufs[self.cur_scanline_id][i - bpp_in]
+                };
+            let b =
+                if self.y == START_Y[self.pass_id] {
+                    0
+                } else {
+                    self.scanline_bufs[1 - self.cur_scanline_id][i]
+                };
+            let c =
+                if i < bpp_in || self.y == START_Y[self.pass_id] {
+                    0
+                } else {
+                    self.scanline_bufs[1 - self.cur_scanline_id][i - bpp_in]
+                };
 
-        let byte = defilter(self.filter.unwrap(), a, b, c, byte);
-
-        if self.defilter_buf.len() != 0 {
-            self.defilter_buf_cursor += 1;
-            self.defilter_buf_cursor %= self.defilter_buf.len();
-            self.defilter_buf[self.defilter_buf_cursor] = byte;
+            let defiltered = defilter(self.filter.unwrap(), a, b, c, self.scanline_bufs[self.cur_scanline_id][i]);
+            self.scanline_bufs[self.cur_scanline_id][i] = defiltered;
         }
 
         if let Some(palette) = &png_image.palette {
-            for j in (0..8).step_by(png_image.image.depth as usize) {
-                let idx_in_palette = ((byte >> (8 - png_image.image.depth - j)) & (((1 as u32) << png_image.image.depth) - 1) as u8) as usize;
-                let idx = (self.y as usize * png_image.image.w as usize + self.x as usize) * bpp;
-                for i in 0..png_image.image.channels {
-                    // png_image.image.buf.push(palette.values[i as usize][idx_in_palette]);
-                    png_image.image.buf[idx + i as usize] = palette.values[i as usize][idx_in_palette];
-                }
-                self.x += STEP_X[self.pass_id];
-                if self.x >= png_image.image.w {
-                    break;
-                }
-            }
-            self.channel = png_image.image.channels - 1;
-        } else { // no palette
-            if png_image.image.depth < 8 {
-                let max_val = (1 << png_image.image.depth) - 1;
-                for j in (0..8).step_by(png_image.image.depth as usize).rev() {
-                    let idx = (self.y as usize * png_image.image.w as usize + self.x as usize) * bpp;
-                    let val = byte >> j & max_val;
-                    png_image.image.buf[idx] = val * (255 / max_val) as u8;
-                    // png_image.image.buf.push((byte >> j & max_val) * (255 / max_val) as u8);
-                    if let Some(trns_alpha) = png_image.trns_alpha {
-                        let alpha = if val as u16 == trns_alpha[0] { 0 } else { 255 };
-                        png_image.image.buf[idx + 1] = alpha;
+            let base_idx = (self.y as usize * png_image.image.w as usize + START_X[self.pass_id] as usize) * bpp_out;
+            let mut idx = 0;
+            for i in 0..self.cur_consumable_bytes {
+                let byte = self.scanline_bufs[self.cur_scanline_id][i];
+                for j in (0..8).step_by(png_image.image.depth as usize) {
+                    let idx_in_palette = ((byte >> (8 - png_image.image.depth - j)) & (((1 as u32) << png_image.image.depth) - 1) as u8) as usize;
+                    for c in 0..png_image.image.channels {
+                        png_image.image.buf[base_idx + idx + c as usize] = palette.values[c as usize][idx_in_palette];
                     }
-                    self.x += STEP_X[self.pass_id];
-                    if self.x >= png_image.image.w {
+                    idx += STEP_X[self.pass_id] as usize * bpp_out;
+                    if idx + START_X[self.pass_id] as usize * bpp_out >= png_image.image.w as usize * bpp_out as usize {
                         break;
                     }
                 }
-            } else { // depth >= 8
-                let idx = (self.y as usize * png_image.image.w as usize + self.x as usize) * bpp + self.channel as usize * bpc + self.channel_byte as usize;
-                png_image.image.buf[idx] = byte;
-                // png_image.image.buf.push(byte);
             }
-            if png_image.image.depth >= 8 && let Some(trns_alpha) = png_image.trns_alpha && self.channel == png_image.image.channels - 2 {
-                let idx = (self.y as usize * png_image.image.w as usize + self.x as usize) * bpp + self.channel as usize * bpc + self.channel_byte as usize;
-                if png_image.image.depth == 8 {
-                    let alpha =
-                        if png_image.image.buf[idx + 2 - png_image.image.channels as usize..idx + 1]
-                            .iter().enumerate().all(|it| *it.1 as u16 == trns_alpha[it.0])
-                        { 0 } else { 255 };
-                    // png_image.image.buf.push(alpha);
-                    png_image.image.buf[idx + 1] = alpha;
-                    self.channel += 1;
-                } else if self.channel_byte == 1 { // depth == 16
-                    let trns_alpha = unsafe { trns_alpha.align_to::<u8>().1 };
-                    let alpha =
-                        if png_image.image.buf[idx + 3 - (png_image.image.channels * 2) as usize..idx + 1]
-                            .iter().enumerate().all(|it| *it.1 == trns_alpha[it.0])
-                        { 0 } else { 255 };
-                    // png_image.image.buf.push(alpha); // lo
-                    // png_image.image.buf.push(alpha); // hi
-                    png_image.image.buf[idx + 1] = alpha; // lo
-                    png_image.image.buf[idx + 2] = alpha; // hi
-                    self.channel += 1;
+        } else { // no palette
+            if png_image.image.depth < 8 {
+                let max_val = (1 << png_image.image.depth) - 1;
+                let base_idx = (self.y as usize * png_image.image.w as usize + START_X[self.pass_id] as usize) * bpp_out;
+                let mut idx = 0;
+                for i in 0..self.cur_consumable_bytes {
+                    let byte = self.scanline_bufs[self.cur_scanline_id][i];
+                    for j in (0..8).step_by(png_image.image.depth as usize).rev() {
+                        let val = byte >> j & max_val;
+                        png_image.image.buf[base_idx + idx] = val * (255 / max_val) as u8;
+                        if let Some(trns_alpha) = png_image.trns_alpha {
+                            let alpha = if val as u16 == trns_alpha[0] { 0 } else { 255 };
+                            png_image.image.buf[base_idx + idx + 1] = alpha;
+                        }
+                        idx += STEP_X[self.pass_id] as usize * bpp_out as usize;
+                        if idx + START_X[self.pass_id] as usize * bpp_out >= png_image.image.w as usize * bpp_out as usize {
+                            break;
+                        }
+                    }
+                }
+            } else { // depth >= 8
+                let mut idx = (self.y as usize * png_image.image.w as usize + START_X[self.pass_id] as usize) * bpp_out as usize;
+                for i in (0..self.cur_consumable_bytes).step_by(png_channels * bpc) {
+                    for c in 0..png_channels * bpc {
+                        let byte = self.scanline_bufs[self.cur_scanline_id][i + c];
+                        png_image.image.buf[idx + c] = byte;
+                    }
+                    if let Some(trns_alpha) = png_image.trns_alpha {
+                        if png_image.image.depth == 8 {
+                            let alpha =
+                                if self.scanline_bufs[self.cur_scanline_id][i..i + png_channels]
+                                    .iter().enumerate().all(|it| *it.1 as u16 == trns_alpha[it.0])
+                                { 0 } else { 255 };
+                            png_image.image.buf[idx + png_channels * bpc] = alpha;
+                        } else { // depth == 16
+                            let trns_alpha = unsafe { trns_alpha.align_to::<u8>().1 };
+                            let alpha =
+                                if self.scanline_bufs[self.cur_scanline_id][i..i + png_channels * 2]
+                                    .iter().enumerate().all(|it| *it.1 == trns_alpha[it.0])
+                                { 0 } else { 255 };
+                            png_image.image.buf[idx + png_channels * 2 + 0] = alpha; // lo
+                            png_image.image.buf[idx + png_channels * 2 + 1] = alpha; // hi
+                        }
+                    }
+                    idx += STEP_X[self.pass_id] as usize * bpp_out as usize;
                 }
             }
         }
 
-        if png_image.image.depth != 16 {
-            self.channel += 1;
-        } else {
-            if self.channel_byte == 1 {
-                self.channel += 1;
-            }
-            self.channel_byte = 1 - self.channel_byte;
-        }
-
-        if png_image.image.depth >= 8 && png_image.palette.is_none() && self.channel >= png_image.image.channels {
-            self.x += STEP_X[self.pass_id];
-            self.channel = 0;
-        }
-
-        if self.x >= png_image.image.w {
-            self.x = START_X[self.pass_id];
-            self.y += STEP_Y[self.pass_id];
-            self.filter = None;
-        }
+        self.y += STEP_Y[self.pass_id];
+        self.filter = None;
+        self.cur_scanline_id = 1 - self.cur_scanline_id;
+        self.cur_scanline_cursor = 0;
+        self.cur_consumable_bytes = 1; // filter type
 
         if png_image.interlaced {
-            while self.x >= png_image.image.w || self.y >= png_image.image.h {
+            while START_X[self.pass_id] >= png_image.image.w || self.y >= png_image.image.h {
                 self.pass_id += 1;
                 if self.pass_id < 8 {
-                    self.x = START_X[self.pass_id];
                     self.y = START_Y[self.pass_id];
                 } else {
                     break;
@@ -560,6 +551,9 @@ fn decode_ihdr(stream: &mut PNGDatastream, png_image: &mut PNGImage) -> Result<(
         return Err(DecodingError::MalformedImage);
     }
     png_image.interlaced = interlace == 1;
+    // if png_image.interlaced {
+    //     println!("Interlaced");
+    // }
 
     png_image.image.w = w;
     png_image.image.h = h;
@@ -637,11 +631,14 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
     if png_image.interlaced {
         reconstructor.pass_id = 1;
     }
-    if png_image.image.depth < 8 || png_image.color_type == 3 {
-        let defilter_buf_size = ((png_image.image.w + 1) as usize * png_image.image.depth as usize + 7) / 8;
-        reconstructor.defilter_buf.resize(defilter_buf_size, 0);
-        reconstructor.defilter_buf_cursor = defilter_buf_size - 1;
-    }
+    let bytes_per_scanline =
+        if png_image.color_type != 3 {
+            (png_image.image.depth as usize * png_image.image.channels as usize * png_image.image.w as usize + 7) / 8
+        } else {
+            (png_image.image.depth as usize * png_image.image.w as usize + 7) / 8
+        };
+    reconstructor.scanline_bufs = [ vec![0; bytes_per_scanline], vec![0; bytes_per_scanline] ];
+    reconstructor.cur_consumable_bytes = 1; // filter type
 
     bs.ensure(stream, 16)?;
     let cmf = bs.read(8);
@@ -650,12 +647,12 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
     if cm != 8 || cinfo > 7 {
         return Err(DecodingError::MalformedImage);
     }
-    // window size is 2 ** (cm + 8)
+    let window_size = 1usize << (cinfo + 8);
     let flg = bs.read(8);
     if (((cmf as u32) << 8 | flg as u32) & 0x1f) % 31 == 0 || flg & 0x20 != 0 {
         return Err(DecodingError::MalformedImage);
     }
-    // let flevel = flg >> 6;
+    // let flevel = flg >> 6; // ignore compression level
 
     // compressed data
     let mut dec_buf: [u8; 32768] = [0; 32768];
@@ -667,7 +664,7 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
         let btype = header >> 1;
         match btype {
             3 => return Err(DecodingError::MalformedImage),
-            1 | 2 => { // 2 or 3
+            1 | 2 => {
                 let mut cls_dist: [u8; 32] = [5; 32];
                 let cls_lit_len = if btype == 2 {
                     // parse literal/length codes
@@ -715,7 +712,7 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                         reconstructor.consume_decoded_byte(png_image, byte)?;
                         dec_buf[dec_cursor] = byte;
                         dec_cursor += 1;
-                        dec_cursor &= 0x7fff;
+                        dec_cursor &= window_size - 1;
                         // println!("lit {sym}");
                     } else if sym == 256 { // end of block
                         // println!("EOB");
@@ -758,9 +755,9 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                             reconstructor.consume_decoded_byte(png_image, byte)?;
                             dec_buf[dec_cursor] = byte;
                             dec_cursor += 1;
-                            dec_cursor &= 0x7fff;
+                            dec_cursor &= window_size - 1;
                             p += 1;
-                            p &= 0x7fff;
+                            p &= window_size - 1;
                             len -= 1;
                         }
                     }
@@ -775,14 +772,11 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                 if nlen != !len {
                     return Err(DecodingError::MalformedImage);
                 }
-                while bs.bits_left > 0 {
+                while len > 0 {
+                    bs.ensure(stream, 8)?;
                     let byte = bs.read(8) as u8;
                     reconstructor.consume_decoded_byte(png_image, byte)?;
                     len -= 1;
-                }
-                for _ in 0..len {
-                    let byte = stream.read_u8()?;
-                    reconstructor.consume_decoded_byte(png_image, byte)?;
                 }
             }
         }
