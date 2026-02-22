@@ -512,10 +512,10 @@ impl PNGReconstructor {
                     break;
                 }
             }
-            if self.pass_id < 8 {
+            if self.pass_id < 8 && self.y == START_Y[self.pass_id] {
                 let scanline_pixels = (png_image.image.w + STEP_X[self.pass_id] - START_X[self.pass_id] - 1) / STEP_X[self.pass_id];
-                self.cur_consumable_bytes = (scanline_pixels as usize * png_channels * png_image.image.depth as usize + 7) / 8;
-                self.scanline_bufs[0][0..self.cur_consumable_bytes].fill(0);
+                let consumable_bytes = (scanline_pixels as usize * png_channels * png_image.image.depth as usize + 7) / 8;
+                self.scanline_bufs[0][0..consumable_bytes].fill(0);
             }
         }
 
