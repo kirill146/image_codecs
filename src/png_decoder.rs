@@ -473,21 +473,31 @@ impl PNGReconstructor {
             } else { // depth >= 8
                 let mut idx = (self.y as usize * png_image.image.w as usize + START_X[self.pass_id] as usize) * bpp_out as usize;
                 let pix_size = png_channels * bpc;
-                for i in (0..self.cur_consumable_bytes).step_by(pix_size) {
-                    png_image.image.buf[idx..idx + pix_size].copy_from_slice(&self.scanline_bufs[1][i..i + pix_size]);
-                    if let Some(trns_alpha) = png_image.trns_alpha {
-                        let trns_alpha: [u8; 6] =
-                            if png_image.image.depth == 8 {
-                                std::array::from_fn(|i| if i < 3 { trns_alpha[i] as u8 } else { 0 })
-                            } else { // depth == 16
-                                std::array::from_fn(|i| (trns_alpha[i / 2] >> (i % 2 * 8)) as u8)
-                            };
+                if STEP_X[self.pass_id] == 1 && bpp_in == bpp_out {
+                    // copy entire scanline
+                    png_image.image.buf[idx..idx + self.cur_consumable_bytes].copy_from_slice(&self.scanline_bufs[1]);
+                } else {
+                    // copy pixel by pixel
+                    for i in (0..self.cur_consumable_bytes).step_by(pix_size) {
+                        png_image.image.buf[idx..idx + pix_size].copy_from_slice(&self.scanline_bufs[1][i..i + pix_size]);
+                        idx += STEP_X[self.pass_id] as usize * bpp_out as usize;
+                    }
+                }
+                if let Some(trns_alpha) = png_image.trns_alpha {
+                    let trns_alpha: [u8; 6] =
+                        if png_image.image.depth == 8 {
+                            std::array::from_fn(|i| if i < 3 { trns_alpha[i] as u8 } else { 0 })
+                        } else { // depth == 16
+                            std::array::from_fn(|i| (trns_alpha[i / 2] >> (i % 2 * 8)) as u8)
+                        };
+                    let mut idx = (self.y as usize * png_image.image.w as usize + START_X[self.pass_id] as usize) * bpp_out as usize;
+                    for i in (0..self.cur_consumable_bytes).step_by(pix_size) {
                         let alpha =
                             if self.scanline_bufs[1][i..i + png_channels * bpc].eq(&trns_alpha[0..png_channels * bpc])
                                 { 0 } else { 255 };
                         png_image.image.buf[idx + png_channels * bpc..idx + png_channels * bpc + bpc].fill(alpha);
+                        idx += STEP_X[self.pass_id] as usize * bpp_out as usize;
                     }
-                    idx += STEP_X[self.pass_id] as usize * bpp_out as usize;
                 }
             }
         }
