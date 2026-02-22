@@ -476,21 +476,16 @@ impl PNGReconstructor {
                 for i in (0..self.cur_consumable_bytes).step_by(pix_size) {
                     png_image.image.buf[idx..idx + pix_size].copy_from_slice(&self.scanline_bufs[1][i..i + pix_size]);
                     if let Some(trns_alpha) = png_image.trns_alpha {
-                        if png_image.image.depth == 8 {
-                            let alpha =
-                                if self.scanline_bufs[1][i..i + png_channels]
-                                    .iter().enumerate().all(|it| *it.1 as u16 == trns_alpha[it.0])
+                        let trns_alpha: [u8; 6] =
+                            if png_image.image.depth == 8 {
+                                std::array::from_fn(|i| if i < 3 { trns_alpha[i] as u8 } else { 0 })
+                            } else { // depth == 16
+                                std::array::from_fn(|i| (trns_alpha[i / 2] >> (i % 2 * 8)) as u8)
+                            };
+                        let alpha =
+                            if self.scanline_bufs[1][i..i + png_channels * bpc].eq(&trns_alpha[0..png_channels * bpc])
                                 { 0 } else { 255 };
-                            png_image.image.buf[idx + png_channels * bpc] = alpha;
-                        } else { // depth == 16
-                            let trns_alpha = unsafe { trns_alpha.align_to::<u8>().1 };
-                            let alpha =
-                                if self.scanline_bufs[1][i..i + png_channels * 2]
-                                    .iter().enumerate().all(|it| *it.1 == trns_alpha[it.0])
-                                { 0 } else { 255 };
-                            png_image.image.buf[idx + png_channels * 2 + 0] = alpha; // lo
-                            png_image.image.buf[idx + png_channels * 2 + 1] = alpha; // hi
-                        }
+                        png_image.image.buf[idx + png_channels * bpc..idx + png_channels * bpc + bpc].fill(alpha);
                     }
                     idx += STEP_X[self.pass_id] as usize * bpp_out as usize;
                 }
