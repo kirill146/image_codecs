@@ -600,7 +600,6 @@ impl BitStream {
     }
 
     fn peek(&mut self, count: u32) -> u64 {
-        assert!(self.bits_left >= count);
         self.buf & ((1 << count) - 1)
     }
 
@@ -828,7 +827,7 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                 const LEN_OFFSETS: [u8; 20] = [11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227];
                 const DIST_OFFSETS: [u16; 26] = [5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
                 loop {
-                    bs.ensure(stream, 15)?;
+                    bs.ensure(stream, 15 + 5)?;
                     let code = bs.peek(15) as usize;
                     let (sym, len) = sym_len(huff_lit_len[code]);
                     bs.skip(len);
@@ -852,12 +851,11 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                             } else if sym == 285 {
                                 258
                             } else {
-                                let extra_bits = (sym - 261) / 4;
-                                bs.ensure(stream, extra_bits as u32)?;
+                                let extra_bits = (sym - 261) / 4; // 1..5 bits
                                 let len = bs.read(extra_bits as u32) as u16;
                                 len + LEN_OFFSETS[(sym - 265) as usize] as u16
                             };
-                        bs.ensure(stream, 15)?;
+                        bs.ensure(stream, 15 + 13)?;
                         let code = bs.peek(15) as usize;
                         let (dist_code, code_len) = sym_len(huff_dist[code]);
                         bs.skip(code_len);
@@ -868,8 +866,7 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                             if dist_code < 4 {
                                 dist_code as usize + 1
                             } else {
-                                let extra_bits = (dist_code - 2) / 2;
-                                bs.ensure(stream, extra_bits as u32)?;
+                                let extra_bits = (dist_code - 2) / 2; // 1..13 bits
                                 let len = bs.read(extra_bits as u32) as u32;
                                 len as usize + DIST_OFFSETS[(dist_code - 4) as usize] as usize
                             };
