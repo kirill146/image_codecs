@@ -696,16 +696,23 @@ fn build_huffman_lut<const N: usize, const M: usize>(cls: &[u8]) -> [u16; M] {
         if len != 0 {
             let code = (next_code[len as usize].reverse_bits() >> (16 - len)) as usize;
             for c in (code..M).step_by(1 << len) {
-                huff[c] = n as u16;
+                huff[c] = n as u16 | ((len as u16) << 9);
             }
             next_code[len as usize] += 1;
         }
     }
 
+    // sym: 9 bits
+    // code_len: 1..15 (4 bits)
+
     return huff;
 }
 
-fn decode_cls<const N_MAX: usize, const N: u32>(bs: &mut BitStream, stream: &mut PNGDatastream, huff: &[u16], huff_cls: &[u8], max_symbol: u32) -> Result<[u8; N_MAX], DecodingError> {
+fn sym_len(code: u16) -> (u16, u8) {
+    return (code & 0x1ff, (code >> 9) as u8);
+}
+
+fn decode_cls<const N_MAX: usize, const N: u32>(bs: &mut BitStream, stream: &mut PNGDatastream, huff: &[u16], max_symbol: u32) -> Result<[u8; N_MAX], DecodingError> {
     // N_MAX is 286 (or maybe 288) or 32
     let mut cls: [u8; N_MAX] = [0; N_MAX];
     const OFFSETS: [u32; 3] = [3, 3, 11];
@@ -714,8 +721,8 @@ fn decode_cls<const N_MAX: usize, const N: u32>(bs: &mut BitStream, stream: &mut
     while sym < max_symbol {
         bs.ensure(stream, N - 1)?;
         let code = bs.peek(N - 1); // TODO: skip code_len bits
-        let cl = huff[code as usize] as u8;
-        bs.skip(huff_cls[cl as usize]);
+        let (cl, len) = sym_len(huff[code as usize]);
+        bs.skip(len);
         if cl >= 16 {
             let idx = cl as usize - 16;
             let offset = OFFSETS[idx];
@@ -728,7 +735,7 @@ fn decode_cls<const N_MAX: usize, const N: u32>(bs: &mut BitStream, stream: &mut
                 sym += 1;
             }
         } else {
-            cls[sym as usize] = cl;
+            cls[sym as usize] = cl as u8;
             sym += 1;
         }
     }
@@ -800,8 +807,8 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                     }
 
                     let huff: [u16; 128] = build_huffman_lut::<8, 128>(&cls_of_cls);
-                    let cls_lit_len = decode_cls::<288, 8>(&mut bs, stream, &huff, &cls_of_cls, 257 + hlit as u32)?;
-                    cls_dist = decode_cls::<32, 8>(&mut bs, stream, &huff, &cls_of_cls, 1 + hdist as u32)?;
+                    let cls_lit_len = decode_cls::<288, 8>(&mut bs, stream, &huff, 257 + hlit as u32)?;
+                    cls_dist = decode_cls::<32, 8>(&mut bs, stream, &huff, 1 + hdist as u32)?;
                     cls_lit_len
                 } else {
                     core::array::from_fn(|i|{
@@ -823,8 +830,8 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                 loop {
                     bs.ensure(stream, 15)?;
                     let code = bs.peek(15) as usize;
-                    let sym = huff_lit_len[code];
-                    bs.skip(cls_lit_len[sym as usize]);
+                    let (sym, len) = sym_len(huff_lit_len[code]);
+                    bs.skip(len);
                     if sym < 256 {
                         let byte = sym as u8;
                         reconstructor.consume_decoded_byte(png_image, byte)?;
@@ -852,8 +859,8 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                             };
                         bs.ensure(stream, 15)?;
                         let code = bs.peek(15) as usize;
-                        let dist_code = huff_dist[code];
-                        bs.skip(cls_dist[dist_code as usize]);
+                        let (dist_code, code_len) = sym_len(huff_dist[code]);
+                        bs.skip(code_len);
                         if dist_code > 29 {
                             return Err(DecodingError::MalformedImage);
                         }
