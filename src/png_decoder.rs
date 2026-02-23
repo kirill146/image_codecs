@@ -171,7 +171,7 @@ impl<'a> PNGDatastream<'a> {
 
     fn read_u8(&mut self) -> Result<u8, DecodingError> {
         if self.cursor + 1 <= self.buf.len() {
-            self.update_crc(&self.buf[self.cursor..self.cursor + 1]);
+            self.update_crc_by_byte(self.buf[self.cursor]);
             let val = self.buf[self.cursor];
             self.cursor += 1;
             Ok(val)
@@ -220,9 +220,13 @@ impl<'a> PNGDatastream<'a> {
         self.crc = 0xffffffff;
     }
 
+    fn update_crc_by_byte(&mut self, byte: u8) {
+        self.crc = CRC_TABLE[(self.crc as u8 ^ byte) as usize] ^ (self.crc >> 8);
+    }
+
     fn update_crc(&mut self, buf: &[u8]) {
         for elem in buf {
-            self.crc = CRC_TABLE[(self.crc as u8 ^ elem) as usize] ^ (self.crc >> 8);
+            self.update_crc_by_byte(*elem);
         }
     }
 
@@ -564,33 +568,35 @@ impl BitStream {
     }
 
     fn ensure(&mut self, datastream: &mut PNGDatastream) -> Result<(), DecodingError> {
-        let len = 57;
-        if len <= self.bits_left || self.end_of_bytestream {
+        if self.end_of_bytestream {
             return Ok(());
         }
-        let mut req_bytes = (len - self.bits_left + 7) / 8;
+        let mut req_bytes = (64 - self.bits_left) / 8;
         loop {
-            let mut available_bytes = std::cmp::min(self.chunk_bytes_left, req_bytes);
-            req_bytes -= available_bytes;
-            self.chunk_bytes_left -= available_bytes;
-            while available_bytes > 0 {
-                self.buf |= (datastream.read_u8()? as u64) << self.bits_left;
+            let available_bytes = std::cmp::min(self.chunk_bytes_left, req_bytes);
+            let slice = &datastream.buf[datastream.cursor..datastream.cursor + available_bytes as usize];
+            for byte in slice {
+                self.buf |= (*byte as u64) << self.bits_left;
                 self.bits_left += 8;
-                available_bytes -= 1;
+                datastream.update_crc_by_byte(*byte);
             }
-            if req_bytes != 0 {
-                datastream.consume_crc()?;
-                self.chunk_bytes_left = datastream.read_u32()?;
-                datastream.reset_crc();
-                let name = datastream.read_chunk_name()?;
-                if &name != b"IDAT" {
-                    datastream.cursor -= 8;
-                    self.end_of_bytestream = true;
-                    break;
-                }
-            } else {
+            datastream.cursor += available_bytes as usize;
+            if req_bytes == available_bytes {
+                self.chunk_bytes_left -= available_bytes;
                 break;
             }
+            datastream.consume_crc()?;
+            self.chunk_bytes_left = datastream.read_u32()?;
+            datastream.reset_crc();
+            let name = datastream.read_chunk_name()?;
+            if &name != b"IDAT" {
+                datastream.cursor -= 8;
+                self.end_of_bytestream = true;
+                break;
+            } else if datastream.cursor + self.chunk_bytes_left as usize > datastream.len() {
+                return Err(DecodingError::MalformedImage);
+            }
+            req_bytes -= available_bytes;
         }
         Ok(())
     }
