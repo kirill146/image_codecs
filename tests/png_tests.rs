@@ -28,6 +28,8 @@ fn test_png_decoder() {
     let mut n_skipped = 0;
     let mut total = Duration::default();
     let mut total_ref = Duration::default();
+    let mut total_bytes_decoded = 0;
+    let mut total_pixels_decoded = 0;
     for path in pngs {
         // if path.file_name().unwrap().display().to_string() != "tm3n3p02.png" {
         //     n_skipped += 1;
@@ -55,6 +57,8 @@ fn test_png_decoder() {
                     Err(err) => if !should_fail { panic!("Decoding failed: {:?}", err) },
                     Ok(image) => {
                         total += elapsed;
+                        total_bytes_decoded += image.buf.len();
+                        total_pixels_decoded += image.w as usize * image.h as usize;
                         if should_fail {
                             panic!("Should have failed");
                         }
@@ -118,7 +122,10 @@ fn test_png_decoder() {
         }
     }
     let rel_perf = total.as_nanos() * 100 / total_ref.as_nanos();
-    println!("ok: {n_ok}, bad: {n_bad}, skipped: {n_skipped}, total: {:?}, total_ref: {:?} ({}%)", total, total_ref, rel_perf);
+    let mb_per_sec = total_bytes_decoded as u64 / (1024 * 1024) / total.as_secs();
+    let mpix_per_sec = total_pixels_decoded as u64 / 1_000_000 / total.as_secs();
+    println!("ok: {n_ok}, bad: {n_bad}, skipped: {n_skipped}");
+    println!("total: {:?}, total_ref: {:?} ({rel_perf}%), {mb_per_sec} Mb/s, {mpix_per_sec} MP/s", total, total_ref);
     assert_ne!(n_ok, 0);
     assert_eq!(n_bad, 0);
     assert_eq!(n_skipped, 0);
