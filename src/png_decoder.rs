@@ -65,6 +65,7 @@ struct BitStream {
     buf: u64,
     bits_left: u32,
     chunk_bytes_left: u32,
+    end_of_bytestream: bool,
 }
 
 #[derive(PartialEq)]
@@ -558,12 +559,13 @@ impl BitStream {
             buf: 0,
             bits_left: 0,
             chunk_bytes_left,
+            end_of_bytestream: false,
         }
     }
 
-    fn ensure(&mut self, datastream: &mut PNGDatastream, len: u32) -> Result<(), DecodingError> {
-        assert!(len <= 57, "");
-        if len <= self.bits_left {
+    fn ensure(&mut self, datastream: &mut PNGDatastream) -> Result<(), DecodingError> {
+        let len = 57;
+        if len <= self.bits_left || self.end_of_bytestream {
             return Ok(());
         }
         let mut req_bytes = (len - self.bits_left + 7) / 8;
@@ -582,7 +584,9 @@ impl BitStream {
                 datastream.reset_crc();
                 let name = datastream.read_chunk_name()?;
                 if &name != b"IDAT" {
-                    return Err(DecodingError::MalformedImage);
+                    datastream.cursor -= 8;
+                    self.end_of_bytestream = true;
+                    break;
                 }
             } else {
                 break;
@@ -591,22 +595,29 @@ impl BitStream {
         Ok(())
     }
 
-    fn read(&mut self, count: u32) -> u64 {
-        assert!(self.bits_left >= count);
-        self.bits_left -= count;
-        let res = self.buf & ((1 << count) - 1);
-        self.buf >>= count;
-        res
+    fn read(&mut self, count: u32) -> Result<u64, DecodingError> {
+        if self.bits_left < count {
+            Err(DecodingError::MalformedImage)
+        } else {
+            self.bits_left -= count;
+            let res = self.buf & ((1 << count) - 1);
+            self.buf >>= count;
+            Ok(res)
+        }
     }
 
     fn peek(&mut self, count: u32) -> u64 {
         self.buf & ((1 << count) - 1)
     }
 
-    fn skip(&mut self, count: u8) {
-        assert!(self.bits_left >= count as u32);
-        self.bits_left -= count as u32;
-        self.buf >>= count;
+    fn skip(&mut self, count: u8) -> Result<(), DecodingError> {
+        if self.bits_left < count as u32 {
+            Err(DecodingError::MalformedImage)
+        } else {
+            self.bits_left -= count as u32;
+            self.buf >>= count;
+            Ok(())
+        }
     }
 }
 
@@ -718,16 +729,15 @@ fn decode_cls<const N_MAX: usize, const N: u32>(bs: &mut BitStream, stream: &mut
     const EXTRA_BITS: [u32; 3] = [2, 3, 7];
     let mut sym: u32 = 0;
     while sym < max_symbol {
-        bs.ensure(stream, N - 1)?;
+        bs.ensure(stream)?;
         let code = bs.peek(N - 1); // TODO: skip code_len bits
         let (cl, len) = sym_len(huff[code as usize]);
-        bs.skip(len);
+        bs.skip(len)?;
         if cl >= 16 {
             let idx = cl as usize - 16;
             let offset = OFFSETS[idx];
             let extra_bits = EXTRA_BITS[idx];
-            bs.ensure(stream, extra_bits)?;
-            let reps = bs.read(extra_bits) as u32 + offset;
+            let reps = bs.read(extra_bits)? as u32 + offset;
             let till = sym + reps;
             while sym != till {
                 cls[sym as usize] = if cl == 16 { cls[sym as usize - 1] } else { 0 };
@@ -764,15 +774,15 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
     reconstructor.cur_scanline_cursor = reconstructor.scanline_bufs[1].as_mut_ptr();
     unsafe { reconstructor.cur_scanline_end = reconstructor.cur_scanline_cursor.add(1) }
 
-    bs.ensure(stream, 16)?;
-    let cmf = bs.read(8);
+    bs.ensure(stream)?;
+    let cmf = bs.read(8)?;
     let cm = cmf & 0xf;
     let cinfo = cmf >> 4;
     if cm != 8 || cinfo > 7 {
         return Err(DecodingError::MalformedImage);
     }
     let window_size = 1usize << (cinfo + 8);
-    let flg = bs.read(8);
+    let flg = bs.read(8)?;
     if (((cmf as u32) << 8 | flg as u32) & 0x1f) % 31 == 0 || flg & 0x20 != 0 {
         return Err(DecodingError::MalformedImage);
     }
@@ -782,8 +792,8 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
     let mut dec_buf: [u8; 32768] = [0; 32768];
     let mut dec_cursor = 0;
     loop {
-        bs.ensure(stream, 3)?;
-        let header = bs.read(3);
+        bs.ensure(stream)?;
+        let header = bs.read(3)?;
         let bfinal = header & 1;
         let btype = header >> 1;
         match btype {
@@ -792,17 +802,17 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                 let mut cls_dist: [u8; 32] = [5; 32];
                 let cls_lit_len = if btype == 2 {
                     // parse literal/length codes
-                    bs.ensure(stream, 14)?;
-                    let hlit = bs.read(5);
-                    let hdist = bs.read(5);
-                    let hclen = bs.read(4) as u32;
+                    bs.ensure(stream)?;
+                    let hlit = bs.read(5)?;
+                    let hdist = bs.read(5)?;
+                    let hclen = bs.read(4)? as u32;
 
                     // cls is code lengths
-                    bs.ensure(stream, (hclen + 4) * 3)?; // conveniently no more than 57 bits
+                    bs.ensure(stream)?; // conveniently no more than 57 bits
                     let mut cls_of_cls: [u8; 19] = [0; 19];
                     const INDEX_ORDER: [usize; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
                     for i in 0..hclen + 4 {
-                        cls_of_cls[INDEX_ORDER[i as usize]] = bs.read(3) as u8;
+                        cls_of_cls[INDEX_ORDER[i as usize]] = bs.read(3)? as u8;
                     }
 
                     let huff: [u16; 128] = build_huffman_lut::<8, 128>(&cls_of_cls);
@@ -827,10 +837,10 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                 const LEN_OFFSETS: [u8; 20] = [11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227];
                 const DIST_OFFSETS: [u16; 26] = [5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
                 loop {
-                    bs.ensure(stream, 15 + 5)?;
+                    bs.ensure(stream)?;
                     let code = bs.peek(15) as usize;
                     let (sym, len) = sym_len(huff_lit_len[code]);
-                    bs.skip(len);
+                    bs.skip(len)?;
                     if sym < 256 {
                         let byte = sym as u8;
                         reconstructor.consume_decoded_byte(png_image, byte)?;
@@ -852,13 +862,12 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                                 258
                             } else {
                                 let extra_bits = (sym - 261) / 4; // 1..5 bits
-                                let len = bs.read(extra_bits as u32) as u16;
+                                let len = bs.read(extra_bits as u32)? as u16;
                                 len + LEN_OFFSETS[(sym - 265) as usize] as u16
                             };
-                        bs.ensure(stream, 15 + 13)?;
                         let code = bs.peek(15) as usize;
                         let (dist_code, code_len) = sym_len(huff_dist[code]);
-                        bs.skip(code_len);
+                        bs.skip(code_len)?;
                         if dist_code > 29 {
                             return Err(DecodingError::MalformedImage);
                         }
@@ -867,7 +876,7 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                                 dist_code as usize + 1
                             } else {
                                 let extra_bits = (dist_code - 2) / 2; // 1..13 bits
-                                let len = bs.read(extra_bits as u32) as u32;
+                                let len = bs.read(extra_bits as u32)? as u32;
                                 len as usize + DIST_OFFSETS[(dist_code - 4) as usize] as usize
                             };
                         let mut p = (dec_cursor + window_size - dist) & (window_size - 1);
@@ -905,17 +914,17 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                 }
             },
             _ => { // 0
-                bs.skip(bs.bits_left as u8 % 8);
-                bs.ensure(stream, 32)?;
-                let len_nlen = bs.read(32) as u32;
+                bs.skip(bs.bits_left as u8 % 8)?;
+                bs.ensure(stream)?;
+                let len_nlen = bs.read(32)? as u32;
                 let mut len = len_nlen as u16;
                 let nlen = (len_nlen >> 16) as u16;
                 if nlen != !len {
                     return Err(DecodingError::MalformedImage);
                 }
                 while len > 0 {
-                    bs.ensure(stream, 8)?;
-                    let byte = bs.read(8) as u8;
+                    bs.ensure(stream)?;
+                    let byte = bs.read(8)? as u8;
                     reconstructor.consume_decoded_byte(png_image, byte)?;
                     len -= 1;
                 }
@@ -928,11 +937,12 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
 
     // skip 4 bytes of zlib's ADLER32 checksum
     let skip_bits = 32 + bs.bits_left % 8; // ignore bs padding bits in the last byte
-    bs.ensure(stream, skip_bits)?;
-    bs.skip(skip_bits as u8);
+    bs.skip(skip_bits as u8)?;
     assert_eq!(bs.bits_left, 0); // TODO: is it always true?
 
-    stream.consume_crc()?;
+    if !bs.end_of_bytestream {
+        stream.consume_crc()?;
+    }
 
     if png_image.image.depth == 16 {
         for i in (0..png_image.image.buf.len()).step_by(2) {
