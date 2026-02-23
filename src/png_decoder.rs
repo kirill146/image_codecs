@@ -568,18 +568,28 @@ impl BitStream {
     }
 
     fn ensure(&mut self, datastream: &mut PNGDatastream) -> Result<(), DecodingError> {
-        if self.end_of_bytestream {
+        if self.bits_left >= 57 || self.end_of_bytestream {
             return Ok(());
         }
         let mut req_bytes = (64 - self.bits_left) / 8;
         loop {
             let available_bytes = std::cmp::min(self.chunk_bytes_left, req_bytes);
-            let slice = &datastream.buf[datastream.cursor..datastream.cursor + available_bytes as usize];
-            for byte in slice {
-                self.buf |= (*byte as u64) << self.bits_left;
-                self.bits_left += 8;
-                datastream.update_crc_by_byte(*byte);
-            }
+
+            let slice: [u8; 8] = datastream.buf[datastream.cursor..datastream.cursor + 8].try_into().unwrap();
+            // let slice: [u8; 8] = datastream.buf[datastream.cursor + available_bytes as usize - 8..datastream.cursor + available_bytes as usize].try_into().unwrap();
+            // let mask = (1 << (available_bytes * 8)) - 1;
+            // let mask = if available_bytes >= 8 { 0xffffffffffffffff } else { (1 << (available_bytes * 8)) - 1 };
+            let mask =
+                if available_bytes == 0 {
+                    0
+                } else {
+                    0xffffffffffffffff >> (64 - available_bytes * 8)
+                };
+            let buf_update = (u64::from_le_bytes(slice) & mask) << self.bits_left;
+            self.buf |= buf_update;
+            self.bits_left += available_bytes * 8;
+            datastream.update_crc(&slice[0..available_bytes as usize]);
+
             datastream.cursor += available_bytes as usize;
             if req_bytes == available_bytes {
                 self.chunk_bytes_left -= available_bytes;
