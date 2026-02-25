@@ -119,7 +119,6 @@ fn test_png_decoder() {
     }
     let rel_perf = total.as_nanos() * 100 / total_ref.as_nanos();
     let mb_per_sec = total_bytes_decoded as u64 * 1_000_000_000 / (1024 * 1024 * total.as_nanos() as u64);
-    println!("{total_bytes_decoded}");
     let mpix_per_sec = total_pixels_decoded as u64 * 1000 / (total.as_nanos() as u64);
     println!("ok: {n_ok}, bad: {n_bad}, skipped: {n_skipped}");
     println!("total: {:?}, total_ref: {:?} ({rel_perf}%), {mb_per_sec} Mb/s, {mpix_per_sec} MP/s", total, total_ref);

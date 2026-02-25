@@ -117,6 +117,7 @@ impl<'a> PNGDatastream<'a> {
         self.cursor == self.buf.len()
     }
 
+    #[inline(always)]
     fn read_u32_unchecked(&mut self) -> Result<u32, DecodingError> {
         if self.cursor + 4 <= self.buf.len() {
             self.update_crc(&self.buf[self.cursor..self.cursor + 4]);
@@ -191,6 +192,7 @@ impl<'a> PNGDatastream<'a> {
         }
     }
 
+    #[inline(always)]
     fn read_chunk_name(&mut self) -> Result<[u8; 4], DecodingError> {
         if self.cursor + 4 < self.buf.len() {
             self.update_crc(&self.buf[self.cursor..self.cursor + 4]);
@@ -246,6 +248,7 @@ impl<'a> PNGDatastream<'a> {
         }
     }
 
+    #[inline(always)]
     fn consume_crc(&mut self) -> Result<(), DecodingError> {
         let crc = self.crc ^ 0xffffffff;
         let crc_check = self.read_u32_unchecked()?;
@@ -583,32 +586,37 @@ impl BitStream {
         }
     }
 
-    fn ensure(&mut self, datastream: &mut PNGDatastream) -> Result<(), DecodingError> {
-        if self.bits_left >= 57 || self.end_of_bytestream {
-            return Ok(());
-        }
-        let mut req_bytes = (64 - self.bits_left) / 8;
+    #[inline(always)]
+    fn ensure_inside_chunk(&mut self, datastream: &mut PNGDatastream, req_bytes: u32) {
+        let available_bytes = req_bytes;
+
+        let slice: [u8; 8] = datastream.buf[datastream.cursor..datastream.cursor + 8].try_into().unwrap();
+        // let slice: [u8; 8] = datastream.buf[datastream.cursor + available_bytes as usize - 8..datastream.cursor + available_bytes as usize].try_into().unwrap();
+        // let mask = (1 << (available_bytes * 8)) - 1;
+        // let mask = if available_bytes >= 8 { 0xffffffffffffffff } else { (1 << (available_bytes * 8)) - 1 };
+        let mask =
+            if available_bytes == 0 {
+                0
+            } else {
+                0xffffffffffffffff >> (64 - available_bytes * 8)
+            };
+        let buf_update = (u64::from_le_bytes(slice) & mask) << self.bits_left;
+        self.buf |= buf_update;
+        self.bits_left += available_bytes * 8;
+        datastream.update_crc(&slice[0..available_bytes as usize]);
+
+        datastream.cursor += available_bytes as usize;
+
+        self.chunk_bytes_left -= req_bytes;
+    }
+
+    #[inline(never)]
+    fn ensure_across_chunks(&mut self, datastream: &mut PNGDatastream, req_bytes: u32) -> Result<(), DecodingError> {
+        let mut req_bytes = req_bytes;
         loop {
             let available_bytes = std::cmp::min(self.chunk_bytes_left, req_bytes);
-
-            let slice: [u8; 8] = datastream.buf[datastream.cursor..datastream.cursor + 8].try_into().unwrap();
-            // let slice: [u8; 8] = datastream.buf[datastream.cursor + available_bytes as usize - 8..datastream.cursor + available_bytes as usize].try_into().unwrap();
-            // let mask = (1 << (available_bytes * 8)) - 1;
-            // let mask = if available_bytes >= 8 { 0xffffffffffffffff } else { (1 << (available_bytes * 8)) - 1 };
-            let mask =
-                if available_bytes == 0 {
-                    0
-                } else {
-                    0xffffffffffffffff >> (64 - available_bytes * 8)
-                };
-            let buf_update = (u64::from_le_bytes(slice) & mask) << self.bits_left;
-            self.buf |= buf_update;
-            self.bits_left += available_bytes * 8;
-            datastream.update_crc(&slice[0..available_bytes as usize]);
-
-            datastream.cursor += available_bytes as usize;
+            self.ensure_inside_chunk(datastream, available_bytes);
             if req_bytes == available_bytes {
-                self.chunk_bytes_left -= available_bytes;
                 break;
             }
             datastream.consume_crc()?;
@@ -625,6 +633,20 @@ impl BitStream {
             req_bytes -= available_bytes;
         }
         Ok(())
+    }
+
+    #[inline(always)]
+    fn ensure(&mut self, datastream: &mut PNGDatastream) -> Result<(), DecodingError> {
+        if self.bits_left >= 57 || self.end_of_bytestream {
+            return Ok(());
+        }
+        let req_bytes = (64 - self.bits_left) / 8;
+        if self.chunk_bytes_left >= req_bytes {
+            self.ensure_inside_chunk(datastream, req_bytes);
+            Ok(())
+        } else {
+            self.ensure_across_chunks(datastream, req_bytes)
+        }
     }
 
     fn read(&mut self, count: u32) -> Result<u64, DecodingError> {
