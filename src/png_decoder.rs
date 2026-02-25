@@ -3,6 +3,7 @@ use crate::DecodingError;
 use crate::Image;
 use std::cmp::max;
 
+const CHECK_CRC: bool = false;
 pub const PNG_SIGNATURE: &[u8] = b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a";
 
 const CRC_TABLE: [u32; 256] = [
@@ -217,23 +218,38 @@ impl<'a> PNGDatastream<'a> {
     }
 
     fn reset_crc(&mut self) {
-        self.crc = 0xffffffff;
+        if CHECK_CRC {
+            self.crc = 0xffffffff;
+        }
     }
 
     fn update_crc_by_byte(&mut self, byte: u8) {
-        self.crc = CRC_TABLE[(self.crc as u8 ^ byte) as usize] ^ (self.crc >> 8);
+        if CHECK_CRC {
+            self.crc = CRC_TABLE[(self.crc as u8 ^ byte) as usize] ^ (self.crc >> 8);
+        }
     }
 
     fn update_crc(&mut self, buf: &[u8]) {
-        for elem in buf {
-            self.update_crc_by_byte(*elem);
+        if CHECK_CRC {
+            for elem in buf {
+                self.update_crc_by_byte(*elem);
+            }
+            // for byte in buf {
+            //     for i in 0..8 {
+            //         let new_bit = (self.crc as u8 ^ (byte >> i)) & 1 > 0;
+            //         self.crc >>= 1;
+            //         if new_bit {
+            //             self.crc ^= 0xedb88320;
+            //         }
+            //     }
+            // }
         }
     }
 
     fn consume_crc(&mut self) -> Result<(), DecodingError> {
         let crc = self.crc ^ 0xffffffff;
         let crc_check = self.read_u32_unchecked()?;
-        if crc != crc_check {
+        if CHECK_CRC && crc != crc_check {
             // println!("{:08x} != {:08x}", crc, crc_check);
             Err(DecodingError::MalformedImage)
         } else {
