@@ -2,6 +2,7 @@
 use crate::DecodingError;
 use crate::Image;
 use std::cmp::max;
+use std::arch::x86_64::*;
 
 const CHECK_CRC: bool = false;
 pub const PNG_SIGNATURE: &[u8] = b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a";
@@ -344,21 +345,146 @@ fn defilter_paeth_3(prev: &[u8], cur: &mut [u8]) {
 }
 
 fn defilter_sub_4(cur: &mut [u8]) {
-    for i in 4..cur.len() {
-        cur[i] = cur[i].wrapping_add(cur[i - 4]);
+    // for i in 4..cur.len() {
+    //     cur[i] = cur[i].wrapping_add(cur[i - 4]);
+    // }
+    unsafe {
+        let mut acc = _mm_loadu_si32(cur.as_ptr());
+        for i in (4..cur.len()).step_by(4) {
+            let ptr = cur.as_mut_ptr().add(i);
+            let x = _mm_loadu_si32(ptr);
+            acc = _mm_add_epi8(acc, x);
+            _mm_storeu_si32(ptr, acc);
+        }
     }
 }
 
 fn defilter_avg_4(prev: &[u8], cur: &mut [u8]) {
-    for i in 4..cur.len() {
-        let avg = (cur[i - 4] as u32 + prev[i] as u32) / 2;
-        cur[i] = cur[i].wrapping_add(avg as u8);
+    // for i in 4..cur.len() {
+    //     let avg = (cur[i - 4] as u32 + prev[i] as u32) / 2;
+    //     cur[i] = cur[i].wrapping_add(avg as u8);
+    // }
+    unsafe {
+        // let mut a = _mm_loadu_si32(cur.as_ptr());
+        // let zero = _mm_setzero_si128();
+        // for i in (4..cur.len()).step_by(4) {
+        //     let ptr_b = prev.as_ptr().add(i);
+        //     let ptr_x = cur.as_mut_ptr().add(i);
+
+        //     let b = _mm_loadu_si32(ptr_b);
+        //     let x = _mm_loadu_si32(ptr_x);
+
+        //     let a16 = _mm_unpacklo_epi8(a, zero);
+        //     let b16 = _mm_unpacklo_epi8(b, zero);
+        //     let sum = _mm_add_epi16(a16, b16);
+        //     let avg = _mm_srli_epi16(sum, 1);
+        //     let avg = _mm_packus_epi16(avg, zero);
+
+        //     a = _mm_add_epi8(x, avg);
+        //     _mm_storeu_si32(ptr_x, a);
+        // }
+
+
+        // avg = (a & b) + ((a ^ b) >> 1)
+        // let mut a = _mm_loadu_si32(cur.as_ptr());
+        // let mask = _mm_cvtsi32_si128(0x7f7f7f7f);
+        // for i in (4..cur.len()).step_by(4) {
+        //     let ptr_b = prev.as_ptr().add(i);
+        //     let ptr_x = cur.as_mut_ptr().add(i);
+
+        //     let b = _mm_loadu_si32(ptr_b);
+        //     let x = _mm_loadu_si32(ptr_x);
+
+        //     let and = _mm_and_si128(a, b);
+        //     let xor = _mm_xor_si128(a, b);
+        //     let shifted = _mm_srli_epi16(xor, 1);
+        //     let shifted = _mm_and_si128(shifted, mask);
+        //     let avg = _mm_add_epi8(and, shifted);
+
+        //     a = _mm_add_epi8(x, avg);
+        //     _mm_storeu_si32(ptr_x, a);
+        // }
+
+
+        // avg = !(((!a as u16 + !b as u16 + 1) / 2) as u8)
+        // avg = !pavgb(!a, !b)
+        let mut a = _mm_loadu_si32(cur.as_ptr());
+        let ones = _mm_cvtsi32_si128(-1);
+        for i in (4..cur.len()).step_by(4) {
+            let ptr_b = prev.as_ptr().add(i);
+            let ptr_x = cur.as_mut_ptr().add(i);
+
+            let b = _mm_loadu_si32(ptr_b);
+            let x = _mm_loadu_si32(ptr_x);
+
+            let inv_a = _mm_xor_si128(a, ones);
+            let inv_b = _mm_xor_si128(b, ones);
+            let inv_avg = _mm_avg_epu8(inv_a, inv_b);
+            let avg = _mm_xor_si128(inv_avg, ones);
+
+            a = _mm_add_epi8(x, avg);
+            _mm_storeu_si32(ptr_x, a);
+        }
     }
 }
 
 fn defilter_paeth_4(prev: &[u8], cur: &mut [u8]) {
-    for i in 4..cur.len() {
-        cur[i] = cur[i].wrapping_add(paeth_predictor(cur[i - 4], prev[i], prev[i - 4]));
+    // for i in 4..cur.len() {
+    //     cur[i] = cur[i].wrapping_add(paeth_predictor(cur[i - 4], prev[i], prev[i - 4]));
+    // }
+    unsafe {
+        let mut a = _mm_loadu_si32(cur.as_ptr());
+        let mut c = _mm_loadu_si32(prev.as_ptr());
+        let ones = _mm_cvtsi32_si128(-1);
+        let zero = _mm_setzero_si128();
+        for i in (4..cur.len()).step_by(4) {
+            let ptr_b = prev.as_ptr().add(i);
+            let ptr_x = cur.as_mut_ptr().add(i);
+
+            let b = _mm_loadu_si32(ptr_b);
+            let x = _mm_loadu_si32(ptr_x);
+
+            let a16 = _mm_unpacklo_epi8(a, zero);
+            let b16 = _mm_unpacklo_epi8(b, zero);
+            let c16 = _mm_unpacklo_epi8(c, zero);
+
+            let p = _mm_add_epi16(a16, b16);
+            let p = _mm_sub_epi16(p, c16);
+
+            let pa = _mm_sub_epi16(p, a16);
+            let pb = _mm_sub_epi16(p, b16);
+            let pc = _mm_sub_epi16(p, c16);
+
+            let pa = _mm_abs_epi16(pa);
+            let pb = _mm_abs_epi16(pb);
+            let pc = _mm_abs_epi16(pc);
+
+            // let pa = (b32 - c32).abs();
+            // let pb = (a32 - c32).abs();
+            // let pc = (a32 + b32 - c32 * 2).abs();
+
+            let min_pb_pc = _mm_min_epi16(pb, pc);
+            let min = _mm_min_epi16(min_pb_pc, pa);
+            let a_mask = _mm_cmpeq_epi16(pa, min);
+            let b_mask = _mm_cmpeq_epi16(pb, min);
+            let b_mask = _mm_andnot_si128(a_mask, b_mask);
+
+            let a_mask = _mm_packs_epi16(a_mask, zero);
+            let b_mask = _mm_packs_epi16(b_mask, zero);
+            let inv_c_mask = _mm_or_si128(a_mask, b_mask);
+            let c_mask = _mm_xor_si128(inv_c_mask, ones);
+            
+            let pred_a = _mm_and_si128(a, a_mask);
+            let pred_b = _mm_and_si128(b, b_mask);
+            let pred_c = _mm_and_si128(c, c_mask);
+
+            let pred = _mm_or_si128(pred_a, pred_b);
+            let pred = _mm_or_si128(pred, pred_c);
+
+            c = b;
+            a = _mm_add_epi8(x, pred);
+            _mm_storeu_si32(ptr_x, a);
+        }
     }
 }
 
@@ -1169,5 +1295,23 @@ mod tests {
             c
         });
         assert_eq!(CRC_TABLE, expected_table);
+    }
+
+    #[test]
+    fn test_avg() {
+        for ai in 0..256 {
+            for bi in 0..256 {
+                let a: u8 = ai as u8;
+                let b: u8 = bi as u8;
+                let expected = ((a as u16 + b as u16) / 2) as u8;
+                let x1 = (a & b) + ((a ^ b) >> 1);
+                assert_eq!(x1, expected);
+                let x2 = !(((!a as u16 + !b as u16 + 1) / 2) as u8);
+                assert_eq!(x2, expected);
+                // if x2 != expected {
+                //     println!("a: {a} b: {b} expected: {expected} x2: {x2}");
+                // }
+            }
+        }
     }
 }
