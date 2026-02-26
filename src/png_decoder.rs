@@ -338,9 +338,73 @@ fn defilter_avg_3(prev: &[u8], cur: &mut [u8]) {
     }
 }
 
+#[target_feature(enable = "ssse3")]
 fn defilter_paeth_3(prev: &[u8], cur: &mut [u8]) {
-    for i in 3..cur.len() {
-        cur[i] = cur[i].wrapping_add(paeth_predictor(cur[i - 3], prev[i], prev[i - 3]));
+    // for i in 3..cur.len() {
+    //     cur[i] = cur[i].wrapping_add(paeth_predictor(cur[i - 3], prev[i], prev[i - 3]));
+    // }
+    unsafe {
+        let mask = _mm_cvtsi32_si128(0xffffff);
+        let mut a = _mm_loadu_si32(cur.as_ptr()); // TODO: out of bounds in cur.len() == 3
+        a = _mm_and_si128(a, mask);
+        let mut c = _mm_loadu_si32(prev.as_ptr()); // TODO: out of bounds
+        c = _mm_and_si128(c, mask);
+        let ones = _mm_cvtsi32_si128(-1);
+        let zero = _mm_setzero_si128();
+        for i in (3..cur.len()).step_by(3) {
+            let ptr_b = prev.as_ptr().add(i);
+            let ptr_x = cur.as_mut_ptr().add(i);
+
+            let b = _mm_loadu_si32(ptr_b); // TODO: last read is out of bounds
+            let b = _mm_and_si128(b, mask);
+            let x = _mm_loadu_si32(ptr_x); // TODO: out of bounds
+            let x = _mm_and_si128(x, mask);
+
+            let a16 = _mm_unpacklo_epi8(a, zero);
+            let b16 = _mm_unpacklo_epi8(b, zero);
+            let c16 = _mm_unpacklo_epi8(c, zero);
+
+            let p = _mm_add_epi16(a16, b16);
+            let p = _mm_sub_epi16(p, c16);
+
+            let pa = _mm_sub_epi16(p, a16);
+            let pb = _mm_sub_epi16(p, b16);
+            let pc = _mm_sub_epi16(p, c16);
+
+            let pa = _mm_abs_epi16(pa);
+            let pb = _mm_abs_epi16(pb);
+            let pc = _mm_abs_epi16(pc);
+
+            // let pa = (b32 - c32).abs();
+            // let pb = (a32 - c32).abs();
+            // let pc = (a32 + b32 - c32 * 2).abs();
+
+            let min_pb_pc = _mm_min_epi16(pb, pc);
+            let min = _mm_min_epi16(min_pb_pc, pa);
+            let a_mask = _mm_cmpeq_epi16(pa, min);
+            let b_mask = _mm_cmpeq_epi16(pb, min);
+            let b_mask = _mm_andnot_si128(a_mask, b_mask);
+
+            let a_mask = _mm_packs_epi16(a_mask, zero);
+            let b_mask = _mm_packs_epi16(b_mask, zero);
+            let inv_c_mask = _mm_or_si128(a_mask, b_mask);
+            let c_mask = _mm_xor_si128(inv_c_mask, ones);
+            
+            let pred_a = _mm_and_si128(a, a_mask);
+            let pred_b = _mm_and_si128(b, b_mask);
+            let pred_c = _mm_and_si128(c, c_mask);
+
+            let pred = _mm_or_si128(pred_a, pred_b);
+            let pred = _mm_or_si128(pred, pred_c);
+
+            c = b;
+            a = _mm_add_epi8(x, pred);
+
+            let pix = _mm_cvtsi128_si32(a);
+            *cur.get_unchecked_mut(i) = pix as u8;
+            *cur.get_unchecked_mut(i + 1) = (pix >> 8) as u8;
+            *cur.get_unchecked_mut(i + 2) = (pix >> 16) as u8;
+        }
     }
 }
 
@@ -428,6 +492,7 @@ fn defilter_avg_4(prev: &[u8], cur: &mut [u8]) {
     }
 }
 
+#[target_feature(enable = "ssse3")]
 fn defilter_paeth_4(prev: &[u8], cur: &mut [u8]) {
     // for i in 4..cur.len() {
     //     cur[i] = cur[i].wrapping_add(paeth_predictor(cur[i - 4], prev[i], prev[i - 4]));
@@ -505,7 +570,7 @@ fn defilter_scanline_3(filter: Filter, prev: &[u8], cur: &mut [u8]) {
         Filter::Sub => defilter_sub_3(cur),
         Filter::Up => defilter_up(3, prev, cur),
         Filter::Average => defilter_avg_3(prev, cur),
-        Filter::Paeth => defilter_paeth_3(prev, cur),
+        Filter::Paeth => unsafe { defilter_paeth_3(prev, cur) },
     }
 }
 
@@ -515,7 +580,7 @@ fn defilter_scanline_4(filter: Filter, prev: &[u8], cur: &mut [u8]) {
         Filter::Sub => defilter_sub_4(cur),
         Filter::Up => defilter_up(4, prev, cur),
         Filter::Average => defilter_avg_4(prev, cur),
-        Filter::Paeth => defilter_paeth_4(prev, cur),
+        Filter::Paeth => unsafe { defilter_paeth_4(prev, cur) },
     }
 }
 
