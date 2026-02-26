@@ -513,12 +513,9 @@ fn defilter_paeth_4(prev: &[u8], cur: &mut [u8]) {
             let b16 = _mm_unpacklo_epi8(b, zero);
             let c16 = _mm_unpacklo_epi8(c, zero);
 
-            let p = _mm_add_epi16(a16, b16);
-            let p = _mm_sub_epi16(p, c16);
-
-            let pa = _mm_sub_epi16(p, a16);
-            let pb = _mm_sub_epi16(p, b16);
-            let pc = _mm_sub_epi16(p, c16);
+            let pa = _mm_sub_epi16(b16, c16);
+            let pb = _mm_sub_epi16(a16, c16);
+            let pc = _mm_add_epi16(pa, pb);
 
             let pa = _mm_abs_epi16(pa);
             let pb = _mm_abs_epi16(pb);
