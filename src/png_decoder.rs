@@ -338,9 +338,30 @@ fn defilter_sub_3(cur: &mut [u8]) {
 }
 
 fn defilter_avg_3(prev: &[u8], cur: &mut [u8]) {
-    for i in 3..cur.len() {
-        let avg = (cur[i - 3] as u32 + prev[i] as u32) / 2;
-        cur[i] = cur[i].wrapping_add(avg as u8);
+    // for i in 3..cur.len() {
+    //     let avg = (cur[i - 3] as u32 + prev[i] as u32) / 2;
+    //     cur[i] = cur[i].wrapping_add(avg as u8);
+    // }
+    unsafe {
+        let mut a = _mm_loadu_si32(cur.as_ptr()); // TODO: oob
+        for i in (3..cur.len()).step_by(3) {
+            let ptr_b = prev.as_ptr().add(i);
+            let ptr_x = cur.as_mut_ptr().add(i);
+
+            let b = _mm_loadu_si32(ptr_b); // TODO: oob
+            let x = _mm_loadu_si32(ptr_x); // TODO: oob
+
+            // (a + b) / 2 == a + b - (a + b + 1) / 2
+            let sum = _mm_add_epi8(a, b);
+            let avg_round_up = _mm_avg_epu8(a, b);
+            let avg = _mm_sub_epi8(sum, avg_round_up);
+
+            a = _mm_add_epi8(x, avg);
+            let pix = _mm_cvtsi128_si32(a);
+            *cur.get_unchecked_mut(i) = pix as u8;
+            *cur.get_unchecked_mut(i + 1) = (pix >> 8) as u8;
+            *cur.get_unchecked_mut(i + 2) = (pix >> 16) as u8;
+        }
     }
 }
 
@@ -409,51 +430,7 @@ fn defilter_avg_4(prev: &[u8], cur: &mut [u8]) {
     //     cur[i] = cur[i].wrapping_add(avg as u8);
     // }
     unsafe {
-        // let mut a = _mm_loadu_si32(cur.as_ptr());
-        // let zero = _mm_setzero_si128();
-        // for i in (4..cur.len()).step_by(4) {
-        //     let ptr_b = prev.as_ptr().add(i);
-        //     let ptr_x = cur.as_mut_ptr().add(i);
-
-        //     let b = _mm_loadu_si32(ptr_b);
-        //     let x = _mm_loadu_si32(ptr_x);
-
-        //     let a16 = _mm_unpacklo_epi8(a, zero);
-        //     let b16 = _mm_unpacklo_epi8(b, zero);
-        //     let sum = _mm_add_epi16(a16, b16);
-        //     let avg = _mm_srli_epi16(sum, 1);
-        //     let avg = _mm_packus_epi16(avg, zero);
-
-        //     a = _mm_add_epi8(x, avg);
-        //     _mm_storeu_si32(ptr_x, a);
-        // }
-
-
-        // avg = (a & b) + ((a ^ b) >> 1)
-        // let mut a = _mm_loadu_si32(cur.as_ptr());
-        // let mask = _mm_cvtsi32_si128(0x7f7f7f7f);
-        // for i in (4..cur.len()).step_by(4) {
-        //     let ptr_b = prev.as_ptr().add(i);
-        //     let ptr_x = cur.as_mut_ptr().add(i);
-
-        //     let b = _mm_loadu_si32(ptr_b);
-        //     let x = _mm_loadu_si32(ptr_x);
-
-        //     let and = _mm_and_si128(a, b);
-        //     let xor = _mm_xor_si128(a, b);
-        //     let shifted = _mm_srli_epi16(xor, 1);
-        //     let shifted = _mm_and_si128(shifted, mask);
-        //     let avg = _mm_add_epi8(and, shifted);
-
-        //     a = _mm_add_epi8(x, avg);
-        //     _mm_storeu_si32(ptr_x, a);
-        // }
-
-
-        // avg = !(((!a as u16 + !b as u16 + 1) / 2) as u8)
-        // avg = !pavgb(!a, !b)
         let mut a = _mm_loadu_si32(cur.as_ptr());
-        let ones = _mm_cvtsi32_si128(-1);
         for i in (4..cur.len()).step_by(4) {
             let ptr_b = prev.as_ptr().add(i);
             let ptr_x = cur.as_mut_ptr().add(i);
@@ -461,10 +438,10 @@ fn defilter_avg_4(prev: &[u8], cur: &mut [u8]) {
             let b = _mm_loadu_si32(ptr_b);
             let x = _mm_loadu_si32(ptr_x);
 
-            let inv_a = _mm_xor_si128(a, ones);
-            let inv_b = _mm_xor_si128(b, ones);
-            let inv_avg = _mm_avg_epu8(inv_a, inv_b);
-            let avg = _mm_xor_si128(inv_avg, ones);
+            // (a + b) / 2 == a + b - (a + b + 1) / 2
+            let sum = _mm_add_epi8(a, b);
+            let avg_round_up = _mm_avg_epu8(a, b);
+            let avg = _mm_sub_epi8(sum, avg_round_up);
 
             a = _mm_add_epi8(x, avg);
             _mm_storeu_si32(ptr_x, a);
