@@ -332,8 +332,22 @@ fn defilter_paeth<const BPP: usize>(prev: &[u8], cur: &mut [u8]) {
 
 
 fn defilter_sub_3(cur: &mut [u8]) {
-    for i in 3..cur.len() {
-        cur[i] = cur[i].wrapping_add(cur[i - 3]);
+    // for i in 3..cur.len() {
+    //     cur[i] = cur[i].wrapping_add(cur[i - 3]);
+    // }
+    unsafe {
+        let mut acc = _mm_loadu_si32(cur.as_ptr()); // TODO: oob
+        for i in (3..cur.len()).step_by(3) {
+            let ptr = cur.as_mut_ptr().add(i);
+            let x = _mm_loadu_si32(ptr); // TODO: oob
+
+            acc = _mm_add_epi8(acc, x);
+
+            let pix = _mm_cvtsi128_si32(acc);
+            *cur.get_unchecked_mut(i) = pix as u8;
+            *cur.get_unchecked_mut(i + 1) = (pix >> 8) as u8;
+            *cur.get_unchecked_mut(i + 2) = (pix >> 16) as u8;
+        }
     }
 }
 
