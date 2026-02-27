@@ -895,9 +895,12 @@ fn build_huffman_lut<const N: usize, const M: usize>(cls: &[u8]) -> [u16; M] {
         let len = cls[n];
         if len != 0 {
             let code = (next_code[len as usize].reverse_bits() >> (16 - len)) as usize;
+            let sym_len = n as u16 | ((len as u16) << 9);
+
             for c in (code..M).step_by(1 << len) {
-                huff[c] = n as u16 | ((len as u16) << 9);
+                huff[c] = sym_len;
             }
+
             next_code[len as usize] += 1;
         }
     }
@@ -947,7 +950,7 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
     use std::cmp::max;
     let sz = png_image.image.w as usize * png_image.image.h as usize * png_image.image.channels as usize
         * max((png_image.image.depth / 8) as usize, 1);
-    png_image.image.buf.resize(sz, 0);
+    png_image.image.buf = vec![0; sz];
     let mut bs = BitStream::new(chunk_bytes_left);
     let mut reconstructor: PNGReconstructor = Default::default();
     if png_image.interlaced {
