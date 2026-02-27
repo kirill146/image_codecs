@@ -263,19 +263,16 @@ impl<'a> PNGDatastream<'a> {
 }
 
 
-fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
+#[allow(dead_code)]
+fn paeth_predictor_orig(a: u8, b: u8, c: u8) -> u8 {
     let a32 = a as i32;
     let b32 = b as i32;
     let c32 = c as i32;
 
     let p = a32 + b32 - c32;
-    let pa = (p - a32).abs();
-    let pb = (p - b32).abs();
-    let pc = (p - c32).abs();
-
-    // let pa = (b32 - c32).abs();
-    // let pb = (a32 - c32).abs();
-    // let pc = (a32 + b32 - c32 * 2).abs();
+    let pa = (p - a32).abs(); // (b32 - c32).abs()
+    let pb = (p - b32).abs(); // (a32 - c32).abs()
+    let pc = (p - c32).abs(); // (a32 + b32 - c32 * 2).abs() == (pre_abs_pa + pre_abs_pb).abs()
 
     if pa <= pb && pa <= pc {
         a
@@ -284,6 +281,15 @@ fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
     } else {
         c
     }
+}
+
+fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
+    // stbi's paeth predictor
+    let thresh = c as i32 * 3 - (a as i32 + b as i32);
+    let lo = if a < b { a } else { b };
+    let hi = if a < b { b } else { a };
+    let t0 = if hi as i32 <= thresh { lo } else { c };
+    if thresh <= lo as i32 { hi } else { t0 }
 }
 
 fn defilter(filter: Filter, a: u8, b: u8, c: u8, filtered: u8) -> u8 {
@@ -346,7 +352,6 @@ fn defilter_paeth_3(prev: &[u8], cur: &mut [u8]) {
     unsafe {
         let mut a = _mm_loadu_si32(cur.as_ptr()); // TODO: out of bounds in cur.len() == 3
         let mut c = _mm_loadu_si32(prev.as_ptr()); // TODO: out of bounds
-        let zero = _mm_setzero_si128();
         for i in (3..cur.len()).step_by(3) {
             let ptr_b = prev.as_ptr().add(i);
             let ptr_x = cur.as_mut_ptr().add(i);
@@ -354,35 +359,23 @@ fn defilter_paeth_3(prev: &[u8], cur: &mut [u8]) {
             let b = _mm_loadu_si32(ptr_b); // TODO: last read is out of bounds
             let x = _mm_loadu_si32(ptr_x); // TODO: out of bounds
 
-            let a16 = _mm_unpacklo_epi8(a, zero);
-            let b16 = _mm_unpacklo_epi8(b, zero);
-            let c16 = _mm_unpacklo_epi8(c, zero);
-
-            let pa = _mm_sub_epi16(b16, c16);
-            let pb = _mm_sub_epi16(a16, c16);
-            let pc = _mm_add_epi16(pa, pb);
-
-            let pa = _mm_abs_epi16(pa);
-            let pb = _mm_abs_epi16(pb);
-            let pc = _mm_abs_epi16(pc);
-
-            // 3 cmpgt, 1 or, 2 blendv
-            let pa_gt_pb = _mm_cmpgt_epi16(pa, pb);
-            let pa_gt_pc = _mm_cmpgt_epi16(pa, pc);
-            let pb_gt_pc = _mm_cmpgt_epi16(pb, pc);
-            let pred_pb_pc_mask = _mm_or_si128(pa_gt_pb, pa_gt_pc);
-            let pred_pb_pc = _mm_blendv_epi8(b16, c16, pb_gt_pc);
-            let pred16 = _mm_blendv_epi8(a16, pred_pb_pc, pred_pb_pc_mask);
-
-            // 1 cmpgt, 1 cmpeq, 2 min, 2 blendv
-            // let pb_gt_pc = _mm_cmpgt_epi16(pb, pc);
-            // let min_pb_pc = _mm_min_epi16(pb, pc);
-            // let min = _mm_min_epi16(pa, min_pb_pc);
-            // let a_mask = _mm_cmpeq_epi16(pa, min);
-            // let pred_b_c = _mm_blendv_epi8(b16, c16, pb_gt_pc);
-            // let pred16 = _mm_blendv_epi8(pred_b_c, a16, a_mask);
-            
-            let pred = _mm_packus_epi16(pred16, zero);
+            // fast 8-bit implementation adapted from https://github.com/veluca93/fpnge/issues/32
+            // c >= max(a, b) -> pa saturates to 0; pred = min(a, b)
+            // c <= min(a, b) -> pb saturates to 0; pred = max(a, b)
+            // min(a, b) < c < max(a, b) -> pa, pb, pc don't saturate and are equal to original ones; pred basically
+            //     calculates as usual, with branchless version of (if, elif, else) from original filter implementation
+            let min_a_b = _mm_min_epu8(a, b);
+            let max_a_b = _mm_max_epu8(a, b);
+            let pa = _mm_subs_epu8(max_a_b, c);
+            let pb = _mm_subs_epu8(c, min_a_b);
+            let min_pa_pb = _mm_min_epu8(pa, pb);
+            let max_pa_pb = _mm_max_epu8(pa, pb);
+            let pc = _mm_sub_epi8(max_pa_pb, min_pa_pb);
+            let min = _mm_min_epu8(min_pa_pb, pc);
+            let min_a_b_mask = _mm_cmpeq_epi8(min, pa);
+            let max_a_b_mask = _mm_cmpeq_epi8(min, pb);
+            let pred_b_c = _mm_blendv_epi8(c, max_a_b, max_a_b_mask);
+            let pred = _mm_blendv_epi8(pred_b_c, min_a_b, min_a_b_mask);
 
             c = b;
             a = _mm_add_epi8(x, pred);
@@ -479,7 +472,7 @@ fn defilter_avg_4(prev: &[u8], cur: &mut [u8]) {
     }
 }
 
-#[target_feature(enable = "ssse3")]
+#[target_feature(enable = "ssse3,sse4.1")]
 fn defilter_paeth_4(prev: &[u8], cur: &mut [u8]) {
     // for i in 4..cur.len() {
     //     cur[i] = cur[i].wrapping_add(paeth_predictor(cur[i - 4], prev[i], prev[i - 4]));
@@ -487,7 +480,6 @@ fn defilter_paeth_4(prev: &[u8], cur: &mut [u8]) {
     unsafe {
         let mut a = _mm_loadu_si32(cur.as_ptr());
         let mut c = _mm_loadu_si32(prev.as_ptr());
-        let zero = _mm_setzero_si128();
         for i in (4..cur.len()).step_by(4) {
             let ptr_b = prev.as_ptr().add(i);
             let ptr_x = cur.as_mut_ptr().add(i);
@@ -495,27 +487,18 @@ fn defilter_paeth_4(prev: &[u8], cur: &mut [u8]) {
             let b = _mm_loadu_si32(ptr_b);
             let x = _mm_loadu_si32(ptr_x);
 
-            let a16 = _mm_unpacklo_epi8(a, zero);
-            let b16 = _mm_unpacklo_epi8(b, zero);
-            let c16 = _mm_unpacklo_epi8(c, zero);
-
-            let pa = _mm_sub_epi16(b16, c16);
-            let pb = _mm_sub_epi16(a16, c16);
-            let pc = _mm_add_epi16(pa, pb);
-
-            let pa = _mm_abs_epi16(pa);
-            let pb = _mm_abs_epi16(pb);
-            let pc = _mm_abs_epi16(pc);
-
-            let pa_gt_pb = _mm_cmpgt_epi16(pa, pb);
-            let pa_gt_pc = _mm_cmpgt_epi16(pa, pc);
-            let pb_gt_pc = _mm_cmpgt_epi16(pb, pc);
-
-            let pred_pb_pc_mask = _mm_or_si128(pa_gt_pb, pa_gt_pc);
-            let pred_pb_pc = _mm_blendv_epi8(b16, c16, pb_gt_pc);
-            let pred16 = _mm_blendv_epi8(a16, pred_pb_pc, pred_pb_pc_mask);
-            
-            let pred = _mm_packus_epi16(pred16, zero);
+            let min_a_b = _mm_min_epu8(a, b);
+            let max_a_b = _mm_max_epu8(a, b);
+            let pa = _mm_subs_epu8(max_a_b, c);
+            let pb = _mm_subs_epu8(c, min_a_b);
+            let min_pa_pb = _mm_min_epu8(pa, pb);
+            let max_pa_pb = _mm_max_epu8(pa, pb);
+            let pc = _mm_sub_epi8(max_pa_pb, min_pa_pb);
+            let min = _mm_min_epu8(min_pa_pb, pc);
+            let a_mask = _mm_cmpeq_epi8(min, pa);
+            let b_mask = _mm_cmpeq_epi8(min, pb);
+            let pred_b_c = _mm_blendv_epi8(c, max_a_b, b_mask);
+            let pred = _mm_blendv_epi8(pred_b_c, min_a_b, a_mask);
 
             c = b;
             a = _mm_add_epi8(x, pred);
