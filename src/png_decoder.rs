@@ -366,13 +366,21 @@ fn defilter_paeth_3(prev: &[u8], cur: &mut [u8]) {
             let pb = _mm_abs_epi16(pb);
             let pc = _mm_abs_epi16(pc);
 
+            // 3 cmpgt, 1 or, 2 blendv
             let pa_gt_pb = _mm_cmpgt_epi16(pa, pb);
             let pa_gt_pc = _mm_cmpgt_epi16(pa, pc);
             let pb_gt_pc = _mm_cmpgt_epi16(pb, pc);
-
             let pred_pb_pc_mask = _mm_or_si128(pa_gt_pb, pa_gt_pc);
             let pred_pb_pc = _mm_blendv_epi8(b16, c16, pb_gt_pc);
             let pred16 = _mm_blendv_epi8(a16, pred_pb_pc, pred_pb_pc_mask);
+
+            // 1 cmpgt, 1 cmpeq, 2 min, 2 blendv
+            // let pb_gt_pc = _mm_cmpgt_epi16(pb, pc);
+            // let min_pb_pc = _mm_min_epi16(pb, pc);
+            // let min = _mm_min_epi16(pa, min_pb_pc);
+            // let a_mask = _mm_cmpeq_epi16(pa, min);
+            // let pred_b_c = _mm_blendv_epi8(b16, c16, pb_gt_pc);
+            // let pred16 = _mm_blendv_epi8(pred_b_c, a16, a_mask);
             
             let pred = _mm_packus_epi16(pred16, zero);
 
