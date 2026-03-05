@@ -635,7 +635,7 @@ impl PNGReconstructor {
             } else { // depth >= 8
                 let mut idx = (self.y as usize * png_image.image.w as usize + START_X[self.pass_id] as usize) * bpp_out as usize;
                 let pix_size = png_channels * bpc;
-                if STEP_X[self.pass_id] == 1 && bpp_in == bpp_out {
+                if STEP_X[self.pass_id] == 1 && png_image.trns_alpha.is_none() {
                     // copy entire scanline
                     png_image.image.buf[idx..idx + self.cur_consumable_bytes].copy_from_slice(&self.scanline_bufs[1]);
                 } else {
