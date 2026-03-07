@@ -1044,7 +1044,8 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
     if cm != 8 || cinfo > 7 {
         return Err(DecodingError::MalformedImage);
     }
-    let window_size = 1usize << (cinfo + 8);
+    // let window_size = 1usize << (cinfo + 8);
+    let window_size = 1usize << 15;
     let flg = bs.read(8)?;
     if (((cmf as u32) << 8 | flg as u32) & 0x1f) % 31 == 0 || flg & 0x20 != 0 {
         return Err(DecodingError::MalformedImage);
@@ -1109,9 +1110,8 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                     if sym < 256 {
                         let byte = sym as u8;
                         reconstructor.consume_decoded_byte(png_image, byte)?;
-                        dec_buf[dec_cursor] = byte;
+                        dec_buf[dec_cursor & (window_size - 1)] = byte;
                         dec_cursor += 1;
-                        dec_cursor &= window_size - 1;
                         // println!("lit {sym}");
                     } else if sym == 256 { // end of block
                         // println!("EOB");
@@ -1165,13 +1165,11 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                         // } else {
                         // slow path
                         while len > 0 {
-                            let byte = dec_buf[p];
+                            let byte = dec_buf[p & (window_size - 1)];
                             reconstructor.consume_decoded_byte(png_image, byte)?;
-                            dec_buf[dec_cursor] = byte;
+                            dec_buf[dec_cursor & (window_size - 1)] = byte;
                             dec_cursor += 1;
-                            dec_cursor &= window_size - 1;
                             p += 1;
-                            p &= window_size - 1;
                             len -= 1;
                         }
                         // }
