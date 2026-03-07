@@ -945,14 +945,14 @@ impl HuffmanTables {
     }
 
     fn lookup_sym_len(&self, code: u16) -> (u16, u8) {
-        let (sym, len) = sym_len(self.fast[code as usize & ((1 << HUFF_FAST_BITS) - 1)]);
+        let packed = self.fast[code as usize & ((1 << HUFF_FAST_BITS) - 1)];
+        let (sym, len) = unpack_sym_len(packed);
         if len != 0 {
             (sym, len)
         } else {
-            let slow_table_id = sym as usize;
             let hi = code >> HUFF_FAST_BITS;
-            let slow_table_offset = slow_table_id * (1 << (15 - HUFF_FAST_BITS));
-            sym_len(self.slow[slow_table_offset as usize + hi as usize])
+            let slow_table_offset = packed * (1 << (15 - HUFF_FAST_BITS));
+            unpack_sym_len(self.slow[slow_table_offset as usize + hi as usize])
         }
     }
 }
@@ -981,8 +981,8 @@ fn build_huffman_lut<const N: usize, const M: usize>(cls: &[u8]) -> [u16; M] {
     huff
 }
 
-fn sym_len(code: u16) -> (u16, u8) {
-    (code & 0x1ff, (code >> 9) as u8)
+fn unpack_sym_len(packed: u16) -> (u16, u8) {
+    (packed & 0x1ff, (packed >> 9) as u8)
 }
 
 fn decode_cls<const N_MAX: usize, const N: u32>(bs: &mut BitStream, stream: &mut PNGDatastream, huff: &[u16], max_symbol: u32) -> Result<[u8; N_MAX], DecodingError> {
@@ -994,7 +994,7 @@ fn decode_cls<const N_MAX: usize, const N: u32>(bs: &mut BitStream, stream: &mut
     while sym < max_symbol {
         bs.ensure(stream)?;
         let code = bs.peek(N - 1); // TODO: skip code_len bits
-        let (cl, len) = sym_len(huff[code as usize]);
+        let (cl, len) = unpack_sym_len(huff[code as usize]);
         bs.skip(len)?;
         if cl >= 16 {
             let idx = cl as usize - 16;
@@ -1054,8 +1054,8 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
     // compressed data
     let mut dec_buf: [u8; 32768] = [0; 32768];
     let mut dec_cursor = 0;
-    let mut huff_lit_len2 = HuffmanTables::new();
-    let mut huff_dist2 = HuffmanTables::new();
+    let mut huff_lit_len = HuffmanTables::new();
+    let mut huff_dist = HuffmanTables::new();
     loop {
         bs.ensure(stream)?;
         let header = bs.read(3)?;
@@ -1095,8 +1095,8 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                     })
                 };
 
-                huff_lit_len2.update(&cls_lit_len);
-                huff_dist2.update(&cls_dist);
+                huff_lit_len.update(&cls_lit_len);
+                huff_dist.update(&cls_dist);
 
                 // the actual compressed data starts here
                 const LEN_OFFSETS: [u8; 20] = [11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227];
@@ -1104,7 +1104,7 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                 loop {
                     bs.ensure(stream)?;
                     let code = bs.peek(15) as usize;
-                    let (sym, len) = huff_lit_len2.lookup_sym_len(code as u16);
+                    let (sym, len) = huff_lit_len.lookup_sym_len(code as u16);
                     bs.skip(len)?;
                     if sym < 256 {
                         let byte = sym as u8;
@@ -1131,7 +1131,7 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                                 len + LEN_OFFSETS[(sym - 265) as usize] as u16
                             };
                         let code = bs.peek(15) as usize;
-                        let (dist_code, code_len) = huff_dist2.lookup_sym_len(code as u16);
+                        let (dist_code, code_len) = huff_dist.lookup_sym_len(code as u16);
                         bs.skip(code_len)?;
                         if dist_code > 29 {
                             return Err(DecodingError::MalformedImage);
