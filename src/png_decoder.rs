@@ -305,65 +305,86 @@ fn defilter(filter: Filter, a: u8, b: u8, c: u8, filtered: u8) -> u8 {
     }
 }
 
-fn defilter_sub<const BPP: usize>(cur: &mut [u8]) {
-    for i in BPP..cur.len() {
-        cur[i] = cur[i].wrapping_add(cur[i - BPP]);
-    }
-}
-
-fn defilter_up(prev: &[u8], cur: &mut [u8]) {
-    for i in 0..cur.len() {
-        cur[i] = cur[i].wrapping_add(prev[i]);
-    }
-}
-
-fn defilter_avg<const BPP: usize>(prev: &[u8], cur: &mut [u8]) {
-    for i in 0..BPP {
-        let avg = prev[i] as u32 / 2;
-        cur[i] = cur[i].wrapping_add(avg as u8);
-    }
-    for i in BPP..cur.len() {
-        let avg = (cur[i - BPP] as u32 + prev[i] as u32) / 2;
-        cur[i] = cur[i].wrapping_add(avg as u8);
-    }
-}
-
-fn defilter_paeth<const BPP: usize>(prev: &[u8], cur: &mut [u8]) {
-    for i in 0..BPP {
-        cur[i] = cur[i].wrapping_add(paeth_predictor(0, prev[i], 0));
-    }
-    for i in BPP..cur.len() {
-        cur[i] = cur[i].wrapping_add(paeth_predictor(cur[i - BPP], prev[i], prev[i - BPP]));
-    }
-}
-
-
-fn defilter_sub_3(cur: &mut [u8]) {
+fn defilter_none(len: usize, cur: *const u8, out: *mut u8) {
     unsafe {
-        let mut acc = _mm_setzero_si128();
-        for i in (0..cur.len()).step_by(3) {
-            let ptr = cur.as_mut_ptr().add(i);
-            let x = _mm_loadu_si32(ptr); // TODO: oob
-
-            acc = _mm_add_epi8(acc, x);
-
-            let pix = _mm_cvtsi128_si32(acc);
-            *cur.get_unchecked_mut(i) = pix as u8;
-            *cur.get_unchecked_mut(i + 1) = (pix >> 8) as u8;
-            *cur.get_unchecked_mut(i + 2) = (pix >> 16) as u8;
+        if out as *const u8 != cur {
+            std::ptr::copy_nonoverlapping(cur, out, len);
         }
     }
 }
 
-fn defilter_avg_3(prev: &[u8], cur: &mut [u8]) {
+fn defilter_sub<const BPP: usize>(len: usize, cur: *const u8, out: *mut u8) {
+    unsafe {
+        for i in 0..BPP {
+            *out.add(i) = *cur.add(i);
+        }
+        for i in BPP..len {
+            // cur[i] = cur[i].wrapping_add(cur[i - BPP]);
+            *out.add(i) = (*cur.add(i)).wrapping_add(*out.add(i - BPP));
+        }
+    }
+}
+
+fn defilter_up(prev: &[u8], cur: *const u8, out: *mut u8) {
+    unsafe {
+        for i in 0..prev.len() {
+            // out[i] = cur[i].wrapping_add(prev[i]);
+            *out.add(i) = (*cur.add(i)).wrapping_add(prev[i]);
+        }
+    }
+}
+
+fn defilter_avg<const BPP: usize>(prev: &[u8], cur: *const u8, out: *mut u8) {
+    unsafe {
+        for i in 0..BPP {
+            let avg = prev[i] / 2;
+            // out[i] = cur[i].wrapping_add(avg);
+            *out.add(i) = (*cur.add(i)).wrapping_add(avg);
+        }
+        for i in BPP..prev.len() {
+            let avg = (*out.add(i - BPP) as u32 + prev[i] as u32) / 2;
+            // out[i] = cur[i].wrapping_add(avg as u8);
+            *out.add(i) = (*cur.add(i)).wrapping_add(avg as u8);
+        }
+    }
+}
+
+fn defilter_paeth<const BPP: usize>(prev: &[u8], cur: *const u8, out: *mut u8) {
+    unsafe {
+        for i in 0..BPP {
+            // out[i] = cur[i].wrapping_add(paeth_predictor(0, prev[i], 0));
+            *out.add(i) = (*cur.add(i)).wrapping_add(paeth_predictor(0, prev[i], 0));
+        }
+        for i in BPP..prev.len() {
+            // out[i] = cur[i].wrapping_add(paeth_predictor(cur[i - BPP], prev[i], prev[i - BPP]));
+            *out.add(i) = (*cur.add(i)).wrapping_add(paeth_predictor(*out.add(i - BPP), prev[i], prev[i - BPP]));
+        }
+    }
+}
+
+
+fn defilter_sub_3(len: usize, cur: *const u8, out: *mut u8) {
+    unsafe {
+        let mut acc = _mm_setzero_si128();
+        for i in (0..len).step_by(3) {
+            let x = _mm_loadu_si32(cur.add(i)); // TODO: oob
+
+            acc = _mm_add_epi8(acc, x);
+
+            let pix = _mm_cvtsi128_si32(acc);
+            *out.add(i) = pix as u8;
+            *out.add(i + 1) = (pix >> 8) as u8;
+            *out.add(i + 2) = (pix >> 16) as u8;
+        }
+    }
+}
+
+fn defilter_avg_3(prev: &[u8], cur: *const u8, out: *mut u8) {
     unsafe {
         let mut a = _mm_setzero_si128();
-        for i in (0..cur.len()).step_by(3) {
-            let ptr_b = prev.as_ptr().add(i);
-            let ptr_x = cur.as_mut_ptr().add(i);
-
-            let b = _mm_loadu_si32(ptr_b); // TODO: oob
-            let x = _mm_loadu_si32(ptr_x); // TODO: oob
+        for i in (0..prev.len()).step_by(3) {
+            let b = _mm_loadu_si32(prev.as_ptr().add(i)); // TODO: oob
+            let x = _mm_loadu_si32(cur.add(i)); // TODO: oob
 
             // (a + b) / 2 == a + b - (a + b + 1) / 2
             let sum = _mm_add_epi8(a, b);
@@ -372,24 +393,21 @@ fn defilter_avg_3(prev: &[u8], cur: &mut [u8]) {
 
             a = _mm_add_epi8(x, avg);
             let pix = _mm_cvtsi128_si32(a);
-            *cur.get_unchecked_mut(i) = pix as u8;
-            *cur.get_unchecked_mut(i + 1) = (pix >> 8) as u8;
-            *cur.get_unchecked_mut(i + 2) = (pix >> 16) as u8;
+            *out.add(i) = pix as u8;
+            *out.add(i + 1) = (pix >> 8) as u8;
+            *out.add(i + 2) = (pix >> 16) as u8;
         }
     }
 }
 
-#[target_feature(enable = "ssse3,sse4.1")]
-fn defilter_paeth_3(prev: &[u8], cur: &mut [u8]) {
+#[target_feature(enable = "sse4.1")]
+fn defilter_paeth_3(prev: &[u8], cur: *const u8, out: *mut u8) {
     unsafe {
         let mut a = _mm_setzero_si128();
         let mut c = _mm_setzero_si128();
-        for i in (0..cur.len()).step_by(3) {
-            let ptr_b = prev.as_ptr().add(i);
-            let ptr_x = cur.as_mut_ptr().add(i);
-
-            let b = _mm_loadu_si32(ptr_b); // TODO: last read is out of bounds
-            let x = _mm_loadu_si32(ptr_x); // TODO: out of bounds
+        for i in (0..prev.len()).step_by(3) {
+            let b = _mm_loadu_si32(prev.as_ptr().add(i)); // TODO: last read is out of bounds
+            let x = _mm_loadu_si32(cur.add(i)); // TODO: out of bounds
 
             // fast 8-bit implementation adapted from https://github.com/veluca93/fpnge/issues/32
             // c >= max(a, b) -> pa saturates to 0; pred = min(a, b)
@@ -413,34 +431,30 @@ fn defilter_paeth_3(prev: &[u8], cur: &mut [u8]) {
             a = _mm_add_epi8(x, pred);
 
             let pix = _mm_cvtsi128_si32(a);
-            *cur.get_unchecked_mut(i) = pix as u8;
-            *cur.get_unchecked_mut(i + 1) = (pix >> 8) as u8;
-            *cur.get_unchecked_mut(i + 2) = (pix >> 16) as u8;
+            *out.add(i) = pix as u8;
+            *out.add(i + 1) = (pix >> 8) as u8;
+            *out.add(i + 2) = (pix >> 16) as u8;
         }
     }
 }
 
-fn defilter_sub_4(cur: &mut [u8]) {
+fn defilter_sub_4(len: usize, cur: *const u8, out: *mut u8) {
     unsafe {
         let mut acc = _mm_setzero_si128();
-        for i in (0..cur.len()).step_by(4) {
-            let ptr = cur.as_mut_ptr().add(i);
-            let x = _mm_loadu_si32(ptr);
+        for i in (0..len).step_by(4) {
+            let x = _mm_loadu_si32(cur.add(i));
             acc = _mm_add_epi8(acc, x);
-            _mm_storeu_si32(ptr, acc);
+            _mm_storeu_si32(out.add(i), acc);
         }
     }
 }
 
-fn defilter_avg_4(prev: &[u8], cur: &mut [u8]) {
+fn defilter_avg_4(prev: &[u8], cur: *const u8, out: *mut u8) {
     unsafe {
         let mut a = _mm_setzero_si128();
-        for i in (0..cur.len()).step_by(4) {
-            let ptr_b = prev.as_ptr().add(i);
-            let ptr_x = cur.as_mut_ptr().add(i);
-
-            let b = _mm_loadu_si32(ptr_b);
-            let x = _mm_loadu_si32(ptr_x);
+        for i in (0..prev.len()).step_by(4) {
+            let b = _mm_loadu_si32(prev.as_ptr().add(i));
+            let x = _mm_loadu_si32(cur.add(i));
 
             // (a + b) / 2 == a + b - (a + b + 1) / 2
             let sum = _mm_add_epi8(a, b);
@@ -448,22 +462,19 @@ fn defilter_avg_4(prev: &[u8], cur: &mut [u8]) {
             let avg = _mm_sub_epi8(sum, avg_round_up);
 
             a = _mm_add_epi8(x, avg);
-            _mm_storeu_si32(ptr_x, a);
+            _mm_storeu_si32(out.add(i), a);
         }
     }
 }
 
-#[target_feature(enable = "ssse3,sse4.1")]
-fn defilter_paeth_4(prev: &[u8], cur: &mut [u8]) {
+#[target_feature(enable = "sse4.1")]
+fn defilter_paeth_4(prev: &[u8], cur: *const u8, out: *mut u8) {
     unsafe {
         let mut a = _mm_setzero_si128();
         let mut c = _mm_setzero_si128();
-        for i in (0..cur.len()).step_by(4) {
-            let ptr_b = prev.as_ptr().add(i);
-            let ptr_x = cur.as_mut_ptr().add(i);
-
-            let b = _mm_loadu_si32(ptr_b);
-            let x = _mm_loadu_si32(ptr_x);
+        for i in (0..prev.len()).step_by(4) {
+            let b = _mm_loadu_si32(prev.as_ptr().add(i));
+            let x = _mm_loadu_si32(cur.add(i));
 
             let min_a_b = _mm_min_epu8(a, b);
             let max_a_b = _mm_max_epu8(a, b);
@@ -480,39 +491,39 @@ fn defilter_paeth_4(prev: &[u8], cur: &mut [u8]) {
 
             c = b;
             a = _mm_add_epi8(x, pred);
-            _mm_storeu_si32(ptr_x, a);
+            _mm_storeu_si32(out.add(i), a);
         }
     }
 }
 
 
-fn defilter_scanline<const BPP: usize>(filter: Filter, prev: &[u8], cur: &mut [u8]) {
+fn defilter_scanline<const BPP: usize>(filter: Filter, prev: &[u8], cur: *const u8, out: *mut u8) {
     match filter {
-        Filter::None => (),
-        Filter::Sub => defilter_sub::<BPP>(cur),
-        Filter::Up => defilter_up(prev, cur),
-        Filter::Average => defilter_avg::<BPP>(prev, cur),
-        Filter::Paeth => defilter_paeth::<BPP>(prev, cur),
+        Filter::None => defilter_none(prev.len(), cur, out),
+        Filter::Sub => defilter_sub::<BPP>(prev.len(), cur, out),
+        Filter::Up => defilter_up(prev, cur, out),
+        Filter::Average => defilter_avg::<BPP>(prev, cur, out),
+        Filter::Paeth => defilter_paeth::<BPP>(prev, cur, out),
     }
 }
 
-fn defilter_scanline_3(filter: Filter, prev: &[u8], cur: &mut [u8]) {
+fn defilter_scanline_3(filter: Filter, prev: &[u8], cur: *const u8, out: *mut u8) {
     match filter {
-        Filter::None => (),
-        Filter::Sub => defilter_sub_3(cur),
-        Filter::Up => defilter_up(prev, cur),
-        Filter::Average => defilter_avg_3(prev, cur),
-        Filter::Paeth => unsafe { defilter_paeth_3(prev, cur) },
+        Filter::None => defilter_none(prev.len(), cur, out),
+        Filter::Sub => defilter_sub_3(prev.len(), cur, out),
+        Filter::Up => defilter_up(prev, cur, out),
+        Filter::Average => defilter_avg_3(prev, cur, out),
+        Filter::Paeth => unsafe { defilter_paeth_3(prev, cur, out) },
     }
 }
 
-fn defilter_scanline_4(filter: Filter, prev: &[u8], cur: &mut [u8]) {
+fn defilter_scanline_4(filter: Filter, prev: &[u8], cur: *const u8, out: *mut u8) {
     match filter {
-        Filter::None => (),
-        Filter::Sub => defilter_sub_4(cur),
-        Filter::Up => defilter_up(prev, cur),
-        Filter::Average => defilter_avg_4(prev, cur),
-        Filter::Paeth => unsafe { defilter_paeth_4(prev, cur) },
+        Filter::None => defilter_none(prev.len(), cur, out),
+        Filter::Sub => defilter_sub_4(prev.len(), cur, out),
+        Filter::Up => defilter_up(prev, cur, out),
+        Filter::Average => defilter_avg_4(prev, cur, out),
+        Filter::Paeth => unsafe { defilter_paeth_4(prev, cur, out) },
     }
 }
 
@@ -552,18 +563,32 @@ impl PNGReconstructor {
         let bpc = (png_image.image.depth / 8) as usize; // bytes per channel
 
         let (prev, cur) = self.scanline_bufs.split_at_mut(1);
-        let prev = &prev[0][1..self.cur_consumable_bytes];
-        let cur = &mut cur[0][1..self.cur_consumable_bytes];
+        let (prev, cur, out) =
+            if png_image.palette.is_none() && png_image.image.depth >= 8 && STEP_X[self.pass_id] == 1 && png_image.trns_alpha.is_none() {
+                let idx = self.y as usize * png_image.image.w as usize * bpp_out as usize;
+                let (img_l, img_r) = png_image.image.buf.split_at_mut(idx);
+                let prev =
+                    if self.y == START_Y[self.pass_id] {
+                        &prev[0][1..self.cur_consumable_bytes]
+                        // &self.scanline_bufs[0][1..self.cur_consumable_bytes]
+                    } else {
+                        let start = idx - (self.cur_consumable_bytes - 1) * STEP_Y[self.pass_id] as usize;
+                        &img_l[start..start + self.cur_consumable_bytes - 1]
+                    };
+                (prev, cur[0][1..self.cur_consumable_bytes].as_ptr(), img_r[0..self.cur_consumable_bytes - 1].as_mut_ptr())
+            } else {
+                (&prev[0][1..self.cur_consumable_bytes], cur[0][1..self.cur_consumable_bytes].as_ptr(), cur[0][1..self.cur_consumable_bytes].as_mut_ptr())
+            };
         
         match bpp_in {
-            1 => defilter_scanline::<1>(filter, prev, cur),
-            2 => defilter_scanline::<2>(filter, prev, cur),
-            // 3 => defilter_scanline::<3>(filter, prev, cur),
-            3 => defilter_scanline_3(filter, prev, cur),
-            // 4 => defilter_scanline::<4>(filter, prev, cur),
-            4 => defilter_scanline_4(filter, prev, cur),
-            6 => defilter_scanline::<6>(filter, prev, cur),
-            8 => defilter_scanline::<8>(filter, prev, cur),
+            1 => defilter_scanline::<1>(filter, prev, cur, out),
+            2 => defilter_scanline::<2>(filter, prev, cur, out),
+            // 3 => defilter_scanline::<3>(filter, prev, cur, out),
+            3 => defilter_scanline_3(filter, prev, cur, out),
+            // 4 => defilter_scanline::<4>(filter, prev, cur, out),
+            4 => defilter_scanline_4(filter, prev, cur, out),
+            6 => defilter_scanline::<6>(filter, prev, cur, out),
+            8 => defilter_scanline::<8>(filter, prev, cur, out),
             _ => panic!("Unreachable")
         }
 
@@ -606,30 +631,27 @@ impl PNGReconstructor {
             } else { // depth >= 8
                 let mut idx = (self.y as usize * png_image.image.w as usize + START_X[self.pass_id] as usize) * bpp_out as usize;
                 let pix_size = png_channels * bpc;
-                if STEP_X[self.pass_id] == 1 && png_image.trns_alpha.is_none() {
-                    // copy entire scanline
-                    png_image.image.buf[idx..idx + self.cur_consumable_bytes - 1].copy_from_slice(&self.scanline_bufs[1][1..self.cur_consumable_bytes]);
-                } else {
+                if STEP_X[self.pass_id] != 1 || png_image.trns_alpha.is_some() {
                     // copy pixel by pixel
                     for i in (1..self.cur_consumable_bytes).step_by(pix_size) {
                         png_image.image.buf[idx..idx + pix_size].copy_from_slice(&self.scanline_bufs[1][i..i + pix_size]);
                         idx += STEP_X[self.pass_id] as usize * bpp_out as usize;
                     }
-                }
-                if let Some(trns_alpha) = png_image.trns_alpha {
-                    let trns_alpha: [u8; 6] =
-                        if png_image.image.depth == 8 {
-                            std::array::from_fn(|i| if i < 3 { trns_alpha[i] as u8 } else { 0 })
-                        } else { // depth == 16
-                            std::array::from_fn(|i| (trns_alpha[i / 2] >> (i % 2 * 8)) as u8)
-                        };
-                    let mut idx = (self.y as usize * png_image.image.w as usize + START_X[self.pass_id] as usize) * bpp_out as usize;
-                    for i in (1..self.cur_consumable_bytes).step_by(pix_size) {
-                        let alpha =
-                            if self.scanline_bufs[1][i..i + png_channels * bpc].eq(&trns_alpha[0..png_channels * bpc])
-                                { 0 } else { 255 };
-                        png_image.image.buf[idx + png_channels * bpc..idx + png_channels * bpc + bpc].fill(alpha);
-                        idx += STEP_X[self.pass_id] as usize * bpp_out as usize;
+                    if let Some(trns_alpha) = png_image.trns_alpha {
+                        let trns_alpha: [u8; 6] =
+                            if png_image.image.depth == 8 {
+                                std::array::from_fn(|i| if i < 3 { trns_alpha[i] as u8 } else { 0 })
+                            } else { // depth == 16
+                                std::array::from_fn(|i| (trns_alpha[i / 2] >> (i % 2 * 8)) as u8)
+                            };
+                        let mut idx = (self.y as usize * png_image.image.w as usize + START_X[self.pass_id] as usize) * bpp_out as usize;
+                        for i in (1..self.cur_consumable_bytes).step_by(pix_size) {
+                            let alpha =
+                                if self.scanline_bufs[1][i..i + png_channels * bpc].eq(&trns_alpha[0..png_channels * bpc])
+                                    { 0 } else { 255 };
+                            png_image.image.buf[idx + png_channels * bpc..idx + png_channels * bpc + bpc].fill(alpha);
+                            idx += STEP_X[self.pass_id] as usize * bpp_out as usize;
+                        }
                     }
                 }
             }
