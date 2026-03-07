@@ -558,7 +558,7 @@ impl PNGReconstructor {
         match bpp_in {
             1 => defilter_scanline::<1>(filter, prev, cur),
             2 => defilter_scanline::<2>(filter, prev, cur),
-            // 3 => defilter_scanline::<3>(filter(), prev, cur),
+            // 3 => defilter_scanline::<3>(filter, prev, cur),
             3 => defilter_scanline_3(filter, prev, cur),
             // 4 => defilter_scanline::<4>(filter, prev, cur),
             4 => defilter_scanline_4(filter, prev, cur),
@@ -1367,13 +1367,16 @@ mod tests {
                 let a: u8 = ai as u8;
                 let b: u8 = bi as u8;
                 let expected = ((a as u16 + b as u16) / 2) as u8;
+
                 let x1 = (a & b) + ((a ^ b) >> 1);
                 assert_eq!(x1, expected);
+
                 let x2 = !(((!a as u16 + !b as u16 + 1) / 2) as u8);
                 assert_eq!(x2, expected);
-                // if x2 != expected {
-                //     println!("a: {a} b: {b} expected: {expected} x2: {x2}");
-                // }
+
+                let pavgb = ((a as u16 + b as u16 + 1) / 2) as u8;
+                let x3 = a.wrapping_add(b).wrapping_sub(pavgb);
+                assert_eq!(x3, expected);
             }
         }
     }
