@@ -1165,15 +1165,26 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                         // } else {
                         // slow path
                         let end = ((dec_cursor + len as usize - 1) & (window_size - 1)) + 1;
+                        let mut cur_scanline_cursor = reconstructor.cur_scanline_cursor;
+                        let mut cur_scanline_end = reconstructor.cur_scanline_end;
                         while dec_cursor != end {
                             p &= window_size - 1;
                             let byte = dec_buf[p];
-                            reconstructor.consume_decoded_byte(png_image, byte)?;
                             dec_cursor &= window_size - 1;
                             dec_buf[dec_cursor] = byte;
                             dec_cursor += 1;
                             p += 1;
+                            unsafe {
+                                *cur_scanline_cursor = byte;
+                                cur_scanline_cursor = cur_scanline_cursor.add(1);
+                            }
+                            if cur_scanline_cursor == cur_scanline_end {
+                                reconstructor.process_scanline(png_image)?;
+                                cur_scanline_cursor = reconstructor.cur_scanline_cursor;
+                                cur_scanline_end = reconstructor.cur_scanline_end;
+                            }
                         }
+                        reconstructor.cur_scanline_cursor = cur_scanline_cursor;
                         // }
                     }
                 }
