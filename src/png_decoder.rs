@@ -84,7 +84,6 @@ enum Filter {
 #[derive(Default)]
 struct PNGReconstructor {
     y: u32,
-    filter: Option<Filter>,
     pass_id: usize, // 0: non-interlaced, 1..7: interlaced
     scanline_bufs: [Vec<u8>; 2], // 0 - prev, 1 - cur
     cur_consumable_bytes: usize,
@@ -549,57 +548,49 @@ impl PNGReconstructor {
             } else {
                 png_image.image.channels as usize - png_image.trns_alpha.is_some() as usize
             };
-        if self.filter == None {
+        let filter = 
             match self.scanline_bufs[1][0] {
-                0 => self.filter = Some(Filter::None),
-                1 => self.filter = Some(Filter::Sub),
-                2 => self.filter = Some(Filter::Up),
-                3 => self.filter = Some(Filter::Average),
-                4 => self.filter = Some(Filter::Paeth),
+                0 => Filter::None,
+                1 => Filter::Sub,
+                2 => Filter::Up,
+                3 => Filter::Average,
+                4 => Filter::Paeth,
                 _ => return Err(DecodingError::MalformedImage)
-            }
-            // println!("filter: {}", byte);
-            
-            let scanline_pixels = (png_image.image.w + STEP_X[self.pass_id] - START_X[self.pass_id] - 1) / STEP_X[self.pass_id];
-            self.cur_consumable_bytes = (scanline_pixels as usize * png_channels * png_image.image.depth as usize + 7) / 8;
-            self.cur_scanline_cursor = self.scanline_bufs[1].as_mut_ptr();
-            unsafe { self.cur_scanline_end = self.cur_scanline_cursor.add(self.cur_consumable_bytes) }
-
-            return Ok(());
-        }
-
+            };
+        // println!("filter: {}", byte);
+        
         let bpp_out = (png_image.image.channels * max(png_image.image.depth, 8) as u32 / 8) as usize; // bytes per pixel
         let bpp_in = if png_image.image.depth < 8 { 1 } else { bpp_out };
         let bpc = (png_image.image.depth / 8) as usize; // bytes per channel
 
-        for i in 0..bpp_in {
+        for i in 1..bpp_in + 1 {
             let a = 0;
             let b = self.scanline_bufs[0][i];
             let c = 0;
             self.scanline_bufs[1][i] =
-                defilter(self.filter.unwrap(), a, b, c, self.scanline_bufs[1][i]);
+                defilter(filter, a, b, c, self.scanline_bufs[1][i]);
         }
 
         let (prev, cur) = self.scanline_bufs.split_at_mut(1);
-        let prev = &prev[0][0..self.cur_consumable_bytes];
-        let cur = &mut cur[0][0..self.cur_consumable_bytes];
+        let prev = &prev[0][1..self.cur_consumable_bytes];
+        let cur = &mut cur[0][1..self.cur_consumable_bytes];
         
         match bpp_in {
-            1 => defilter_scanline::<1>(self.filter.unwrap(), prev, cur),
-            2 => defilter_scanline::<2>(self.filter.unwrap(), prev, cur),
-            // 3 => defilter_scanline::<3>(self.filter.unwrap(), prev, cur),
-            3 => defilter_scanline_3(self.filter.unwrap(), prev, cur),
-            // 4 => defilter_scanline::<4>(self.filter.unwrap(), prev, cur),
-            4 => defilter_scanline_4(self.filter.unwrap(), prev, cur),
-            6 => defilter_scanline::<6>(self.filter.unwrap(), prev, cur),
-            8 => defilter_scanline::<8>(self.filter.unwrap(), prev, cur),
+            1 => defilter_scanline::<1>(filter, prev, cur),
+            2 => defilter_scanline::<2>(filter, prev, cur),
+            // 3 => defilter_scanline::<3>(filter(), prev, cur),
+            3 => defilter_scanline_3(filter, prev, cur),
+            // 4 => defilter_scanline::<4>(filter, prev, cur),
+            4 => defilter_scanline_4(filter, prev, cur),
+            6 => defilter_scanline::<6>(filter, prev, cur),
+            8 => defilter_scanline::<8>(filter, prev, cur),
             _ => panic!("Unreachable")
         }
 
         if let Some(palette) = &png_image.palette {
             let base_idx = (self.y as usize * png_image.image.w as usize + START_X[self.pass_id] as usize) * bpp_out;
             let mut idx = 0;
-            for i in 0..self.cur_consumable_bytes {
+            for i in 1..self.cur_consumable_bytes {
                 let byte = self.scanline_bufs[1][i];
                 for j in (0..8).step_by(png_image.image.depth as usize) {
                     let idx_in_palette = ((byte >> (8 - png_image.image.depth - j)) & (((1 as u32) << png_image.image.depth) - 1) as u8) as usize;
@@ -617,7 +608,7 @@ impl PNGReconstructor {
                 let max_val = (1 << png_image.image.depth) - 1;
                 let base_idx = (self.y as usize * png_image.image.w as usize + START_X[self.pass_id] as usize) * bpp_out;
                 let mut idx = 0;
-                for i in 0..self.cur_consumable_bytes {
+                for i in 1..self.cur_consumable_bytes {
                     let byte = self.scanline_bufs[1][i];
                     for j in (0..8).step_by(png_image.image.depth as usize).rev() {
                         let val = byte >> j & max_val;
@@ -637,10 +628,10 @@ impl PNGReconstructor {
                 let pix_size = png_channels * bpc;
                 if STEP_X[self.pass_id] == 1 && png_image.trns_alpha.is_none() {
                     // copy entire scanline
-                    png_image.image.buf[idx..idx + self.cur_consumable_bytes].copy_from_slice(&self.scanline_bufs[1]);
+                    png_image.image.buf[idx..idx + self.cur_consumable_bytes - 1].copy_from_slice(&self.scanline_bufs[1][1..self.cur_consumable_bytes]);
                 } else {
                     // copy pixel by pixel
-                    for i in (0..self.cur_consumable_bytes).step_by(pix_size) {
+                    for i in (1..self.cur_consumable_bytes).step_by(pix_size) {
                         png_image.image.buf[idx..idx + pix_size].copy_from_slice(&self.scanline_bufs[1][i..i + pix_size]);
                         idx += STEP_X[self.pass_id] as usize * bpp_out as usize;
                     }
@@ -653,7 +644,7 @@ impl PNGReconstructor {
                             std::array::from_fn(|i| (trns_alpha[i / 2] >> (i % 2 * 8)) as u8)
                         };
                     let mut idx = (self.y as usize * png_image.image.w as usize + START_X[self.pass_id] as usize) * bpp_out as usize;
-                    for i in (0..self.cur_consumable_bytes).step_by(pix_size) {
+                    for i in (1..self.cur_consumable_bytes).step_by(pix_size) {
                         let alpha =
                             if self.scanline_bufs[1][i..i + png_channels * bpc].eq(&trns_alpha[0..png_channels * bpc])
                                 { 0 } else { 255 };
@@ -665,11 +656,7 @@ impl PNGReconstructor {
         }
 
         self.y += STEP_Y[self.pass_id];
-        self.filter = None;
-        self.cur_consumable_bytes = 1; // filter type
         self.scanline_bufs.swap(0, 1);
-        self.cur_scanline_cursor = self.scanline_bufs[1].as_mut_ptr();
-        unsafe { self.cur_scanline_end = self.cur_scanline_cursor.add(1) }
 
         if png_image.interlaced {
             while START_X[self.pass_id] >= png_image.image.w || self.y >= png_image.image.h {
@@ -682,10 +669,13 @@ impl PNGReconstructor {
             }
             if self.pass_id < 8 && self.y == START_Y[self.pass_id] {
                 let scanline_pixels = (png_image.image.w + STEP_X[self.pass_id] - START_X[self.pass_id] - 1) / STEP_X[self.pass_id];
-                let consumable_bytes = (scanline_pixels as usize * png_channels * png_image.image.depth as usize + 7) / 8;
-                self.scanline_bufs[0][0..consumable_bytes].fill(0);
+                self.cur_consumable_bytes = (scanline_pixels as usize * png_channels * png_image.image.depth as usize + 7) / 8 + 1;
+                self.scanline_bufs[0][0..self.cur_consumable_bytes].fill(0);
             }
         }
+
+        self.cur_scanline_cursor = self.scanline_bufs[1].as_mut_ptr();
+        unsafe { self.cur_scanline_end = self.cur_scanline_cursor.add(self.cur_consumable_bytes) }
 
         Ok(())
     }
@@ -1026,16 +1016,24 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
     if png_image.interlaced {
         reconstructor.pass_id = 1;
     }
-    let bytes_per_scanline =
+    let bytes_per_scanline = 1 +
         if png_image.color_type != 3 {
             (png_image.image.depth as usize * png_image.image.channels as usize * png_image.image.w as usize + 7) / 8
         } else {
             (png_image.image.depth as usize * png_image.image.w as usize + 7) / 8
         };
     reconstructor.scanline_bufs = [ vec![0; bytes_per_scanline], vec![0; bytes_per_scanline] ];
-    reconstructor.cur_consumable_bytes = 1; // filter type
+
+    let png_channels =
+        if png_image.color_type == 3 {
+            1
+        } else {
+            png_image.image.channels as usize - png_image.trns_alpha.is_some() as usize
+        };
+    let scanline_pixels = (png_image.image.w + STEP_X[reconstructor.pass_id] - START_X[reconstructor.pass_id] - 1) / STEP_X[reconstructor.pass_id];
+    reconstructor.cur_consumable_bytes = (scanline_pixels as usize * png_channels * png_image.image.depth as usize + 7) / 8 + 1;
     reconstructor.cur_scanline_cursor = reconstructor.scanline_bufs[1].as_mut_ptr();
-    unsafe { reconstructor.cur_scanline_end = reconstructor.cur_scanline_cursor.add(1) }
+    unsafe { reconstructor.cur_scanline_end = reconstructor.cur_scanline_cursor.add(reconstructor.cur_consumable_bytes) }
 
     bs.ensure(stream)?;
     let cmf = bs.read(8)?;
