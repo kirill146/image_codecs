@@ -291,6 +291,7 @@ fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
     if thresh <= lo as i32 { hi } else { t0 }
 }
 
+#[allow(dead_code)]
 fn defilter(filter: Filter, a: u8, b: u8, c: u8, filtered: u8) -> u8 {
     match filter {
         Filter::None => filtered,
@@ -310,13 +311,17 @@ fn defilter_sub<const BPP: usize>(cur: &mut [u8]) {
     }
 }
 
-fn defilter_up(bpp: usize, prev: &[u8], cur: &mut [u8]) {
-    for i in bpp..cur.len() {
+fn defilter_up(prev: &[u8], cur: &mut [u8]) {
+    for i in 0..cur.len() {
         cur[i] = cur[i].wrapping_add(prev[i]);
     }
 }
 
 fn defilter_avg<const BPP: usize>(prev: &[u8], cur: &mut [u8]) {
+    for i in 0..BPP {
+        let avg = prev[i] as u32 / 2;
+        cur[i] = cur[i].wrapping_add(avg as u8);
+    }
     for i in BPP..cur.len() {
         let avg = (cur[i - BPP] as u32 + prev[i] as u32) / 2;
         cur[i] = cur[i].wrapping_add(avg as u8);
@@ -324,6 +329,9 @@ fn defilter_avg<const BPP: usize>(prev: &[u8], cur: &mut [u8]) {
 }
 
 fn defilter_paeth<const BPP: usize>(prev: &[u8], cur: &mut [u8]) {
+    for i in 0..BPP {
+        cur[i] = cur[i].wrapping_add(paeth_predictor(0, prev[i], 0));
+    }
     for i in BPP..cur.len() {
         cur[i] = cur[i].wrapping_add(paeth_predictor(cur[i - BPP], prev[i], prev[i - BPP]));
     }
@@ -331,12 +339,9 @@ fn defilter_paeth<const BPP: usize>(prev: &[u8], cur: &mut [u8]) {
 
 
 fn defilter_sub_3(cur: &mut [u8]) {
-    // for i in 3..cur.len() {
-    //     cur[i] = cur[i].wrapping_add(cur[i - 3]);
-    // }
     unsafe {
-        let mut acc = _mm_loadu_si32(cur.as_ptr()); // TODO: oob
-        for i in (3..cur.len()).step_by(3) {
+        let mut acc = _mm_setzero_si128();
+        for i in (0..cur.len()).step_by(3) {
             let ptr = cur.as_mut_ptr().add(i);
             let x = _mm_loadu_si32(ptr); // TODO: oob
 
@@ -351,13 +356,9 @@ fn defilter_sub_3(cur: &mut [u8]) {
 }
 
 fn defilter_avg_3(prev: &[u8], cur: &mut [u8]) {
-    // for i in 3..cur.len() {
-    //     let avg = (cur[i - 3] as u32 + prev[i] as u32) / 2;
-    //     cur[i] = cur[i].wrapping_add(avg as u8);
-    // }
     unsafe {
-        let mut a = _mm_loadu_si32(cur.as_ptr()); // TODO: oob
-        for i in (3..cur.len()).step_by(3) {
+        let mut a = _mm_setzero_si128();
+        for i in (0..cur.len()).step_by(3) {
             let ptr_b = prev.as_ptr().add(i);
             let ptr_x = cur.as_mut_ptr().add(i);
 
@@ -380,13 +381,10 @@ fn defilter_avg_3(prev: &[u8], cur: &mut [u8]) {
 
 #[target_feature(enable = "ssse3,sse4.1")]
 fn defilter_paeth_3(prev: &[u8], cur: &mut [u8]) {
-    // for i in 3..cur.len() {
-    //     cur[i] = cur[i].wrapping_add(paeth_predictor(cur[i - 3], prev[i], prev[i - 3]));
-    // }
     unsafe {
-        let mut a = _mm_loadu_si32(cur.as_ptr()); // TODO: out of bounds in cur.len() == 3
-        let mut c = _mm_loadu_si32(prev.as_ptr()); // TODO: out of bounds
-        for i in (3..cur.len()).step_by(3) {
+        let mut a = _mm_setzero_si128();
+        let mut c = _mm_setzero_si128();
+        for i in (0..cur.len()).step_by(3) {
             let ptr_b = prev.as_ptr().add(i);
             let ptr_x = cur.as_mut_ptr().add(i);
 
@@ -423,12 +421,9 @@ fn defilter_paeth_3(prev: &[u8], cur: &mut [u8]) {
 }
 
 fn defilter_sub_4(cur: &mut [u8]) {
-    // for i in 4..cur.len() {
-    //     cur[i] = cur[i].wrapping_add(cur[i - 4]);
-    // }
     unsafe {
-        let mut acc = _mm_loadu_si32(cur.as_ptr());
-        for i in (4..cur.len()).step_by(4) {
+        let mut acc = _mm_setzero_si128();
+        for i in (0..cur.len()).step_by(4) {
             let ptr = cur.as_mut_ptr().add(i);
             let x = _mm_loadu_si32(ptr);
             acc = _mm_add_epi8(acc, x);
@@ -438,13 +433,9 @@ fn defilter_sub_4(cur: &mut [u8]) {
 }
 
 fn defilter_avg_4(prev: &[u8], cur: &mut [u8]) {
-    // for i in 4..cur.len() {
-    //     let avg = (cur[i - 4] as u32 + prev[i] as u32) / 2;
-    //     cur[i] = cur[i].wrapping_add(avg as u8);
-    // }
     unsafe {
-        let mut a = _mm_loadu_si32(cur.as_ptr());
-        for i in (4..cur.len()).step_by(4) {
+        let mut a = _mm_setzero_si128();
+        for i in (0..cur.len()).step_by(4) {
             let ptr_b = prev.as_ptr().add(i);
             let ptr_x = cur.as_mut_ptr().add(i);
 
@@ -464,13 +455,10 @@ fn defilter_avg_4(prev: &[u8], cur: &mut [u8]) {
 
 #[target_feature(enable = "ssse3,sse4.1")]
 fn defilter_paeth_4(prev: &[u8], cur: &mut [u8]) {
-    // for i in 4..cur.len() {
-    //     cur[i] = cur[i].wrapping_add(paeth_predictor(cur[i - 4], prev[i], prev[i - 4]));
-    // }
     unsafe {
-        let mut a = _mm_loadu_si32(cur.as_ptr());
-        let mut c = _mm_loadu_si32(prev.as_ptr());
-        for i in (4..cur.len()).step_by(4) {
+        let mut a = _mm_setzero_si128();
+        let mut c = _mm_setzero_si128();
+        for i in (0..cur.len()).step_by(4) {
             let ptr_b = prev.as_ptr().add(i);
             let ptr_x = cur.as_mut_ptr().add(i);
 
@@ -502,7 +490,7 @@ fn defilter_scanline<const BPP: usize>(filter: Filter, prev: &[u8], cur: &mut [u
     match filter {
         Filter::None => (),
         Filter::Sub => defilter_sub::<BPP>(cur),
-        Filter::Up => defilter_up(BPP, prev, cur),
+        Filter::Up => defilter_up(prev, cur),
         Filter::Average => defilter_avg::<BPP>(prev, cur),
         Filter::Paeth => defilter_paeth::<BPP>(prev, cur),
     }
@@ -512,7 +500,7 @@ fn defilter_scanline_3(filter: Filter, prev: &[u8], cur: &mut [u8]) {
     match filter {
         Filter::None => (),
         Filter::Sub => defilter_sub_3(cur),
-        Filter::Up => defilter_up(3, prev, cur),
+        Filter::Up => defilter_up(prev, cur),
         Filter::Average => defilter_avg_3(prev, cur),
         Filter::Paeth => unsafe { defilter_paeth_3(prev, cur) },
     }
@@ -522,7 +510,7 @@ fn defilter_scanline_4(filter: Filter, prev: &[u8], cur: &mut [u8]) {
     match filter {
         Filter::None => (),
         Filter::Sub => defilter_sub_4(cur),
-        Filter::Up => defilter_up(4, prev, cur),
+        Filter::Up => defilter_up(prev, cur),
         Filter::Average => defilter_avg_4(prev, cur),
         Filter::Paeth => unsafe { defilter_paeth_4(prev, cur) },
     }
@@ -562,14 +550,6 @@ impl PNGReconstructor {
         let bpp_out = (png_image.image.channels * max(png_image.image.depth, 8) as u32 / 8) as usize; // bytes per pixel
         let bpp_in = if png_image.image.depth < 8 { 1 } else { bpp_out };
         let bpc = (png_image.image.depth / 8) as usize; // bytes per channel
-
-        for i in 1..bpp_in + 1 {
-            let a = 0;
-            let b = self.scanline_bufs[0][i];
-            let c = 0;
-            self.scanline_bufs[1][i] =
-                defilter(filter, a, b, c, self.scanline_bufs[1][i]);
-        }
 
         let (prev, cur) = self.scanline_bufs.split_at_mut(1);
         let prev = &prev[0][1..self.cur_consumable_bytes];
