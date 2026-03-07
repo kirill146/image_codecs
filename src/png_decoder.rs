@@ -1120,7 +1120,7 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                         if sym > 285 {
                             return Err(DecodingError::MalformedImage);
                         }
-                        let mut len =
+                        let len =
                             if sym < 265 {
                                 sym - 254
                             } else if sym == 285 {
@@ -1164,13 +1164,15 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                         //     dec_cursor += len as usize;
                         // } else {
                         // slow path
-                        while len > 0 {
-                            let byte = dec_buf[p & (window_size - 1)];
+                        let end = ((dec_cursor + len as usize - 1) & (window_size - 1)) + 1;
+                        while dec_cursor != end {
+                            p &= window_size - 1;
+                            let byte = dec_buf[p];
                             reconstructor.consume_decoded_byte(png_image, byte)?;
-                            dec_buf[dec_cursor & (window_size - 1)] = byte;
+                            dec_cursor &= window_size - 1;
+                            dec_buf[dec_cursor] = byte;
                             dec_cursor += 1;
                             p += 1;
-                            len -= 1;
                         }
                         // }
                     }
