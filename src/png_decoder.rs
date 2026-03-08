@@ -998,6 +998,25 @@ fn decode_cls<const N_MAX: usize, const N: u32>(bs: &mut BitStream, stream: &mut
 }
 
 #[inline(never)]
+fn memcpy_2_dsts(src: *const u8, dst1: *mut u8, dst2: *mut u8, cnt: usize) {
+    let t = cnt & 0xfffffffffffffff0;
+    for i in (0..t).step_by(16) {
+        unsafe {
+            let data = _mm_loadu_si128(src.add(i) as *const __m128i);
+            _mm_storeu_si128(dst1.add(i) as *mut __m128i, data);
+            _mm_storeu_si128(dst2.add(i) as *mut __m128i, data);
+        }
+    }
+    for i in t..cnt {
+        unsafe {
+            let data = *src.add(i);
+            *dst1.add(i) = data;
+            *dst2.add(i) = data;
+        }
+    }
+}
+
+#[inline(never)]
 fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mut PNGImage) -> Result<(), DecodingError> {
     use std::cmp::max;
     let sz = png_image.image.w as usize * png_image.image.h as usize * png_image.image.channels as usize
@@ -1178,17 +1197,31 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                             // let n = unsafe { to.offset_from(cur_scanline_cursor) } as u16;
                             // while cur_scanline_cursor as *const u8 != to {
                             // while out_cursor < cnt {
-                            for out_cursor in 0..cnt {
-                                p &= window_size - 1;
-                                let byte = dec_buf[p];
-                                dec_buf[dec_cursor] = byte;
-                                dec_cursor += 1;
-                                dec_cursor &= window_size - 1;
-                                p += 1;
-                                // (cur_scanline_cursor, cur_scanline_end) = reconstructor.consume_decoded_byte(png_image, byte, cur_scanline_cursor, cur_scanline_end)?;
+                            if p + cnt <= dec_cursor && dec_cursor + cnt < window_size ||
+                               dec_cursor + cnt <= p && p + cnt < window_size
+                            {
                                 unsafe {
-                                    *cur_scanline_cursor.add(out_cursor) = byte;
-                                };
+                                    let src = dec_buf.as_ptr().add(p);
+                                    let dst = dec_buf.as_mut_ptr().add(dec_cursor);
+                                    // std::ptr::copy_nonoverlapping(src, dst, cnt);
+                                    // std::ptr::copy_nonoverlapping(src, cur_scanline_cursor, cnt);
+                                    memcpy_2_dsts(src, dst, cur_scanline_cursor, cnt);
+                                }
+                                dec_cursor = (dec_cursor + cnt) & (window_size - 1);
+                                p = (p + cnt) & (window_size - 1);
+                            } else {
+                                for out_cursor in 0..cnt {
+                                    p &= window_size - 1;
+                                    let byte = dec_buf[p];
+                                    dec_buf[dec_cursor] = byte;
+                                    dec_cursor += 1;
+                                    dec_cursor &= window_size - 1;
+                                    p += 1;
+                                    // (cur_scanline_cursor, cur_scanline_end) = reconstructor.consume_decoded_byte(png_image, byte, cur_scanline_cursor, cur_scanline_end)?;
+                                    unsafe {
+                                        *cur_scanline_cursor.add(out_cursor) = byte;
+                                    };
+                                }
                             }
                             if cnt == bytes_left {
                                 (cur_scanline_cursor, cur_scanline_end) = reconstructor.process_scanline(png_image)?;
