@@ -87,8 +87,6 @@ struct PNGReconstructor {
     pass_id: usize, // 0: non-interlaced, 1..7: interlaced
     scanline_bufs: [Vec<u8>; 2], // 0 - prev, 1 - cur
     cur_consumable_bytes: usize,
-    cur_scanline_cursor: *mut u8,
-    cur_scanline_end: *mut u8,
 }
 
 impl Palette {
@@ -536,7 +534,7 @@ const STEP_Y:  [u32; 8] = [ 1, 8, 8, 8, 4, 4, 2, 2 ];
 
 impl PNGReconstructor {
     #[inline(never)]
-    fn process_scanline(&mut self, png_image: &mut PNGImage) -> Result<(), DecodingError> {
+    fn process_scanline(&mut self, png_image: &mut PNGImage) -> Result<(*mut u8, *const u8), DecodingError> {
         if self.y >= png_image.image.h || self.pass_id >= 8 {
             return Err(DecodingError::MalformedImage);
         }
@@ -676,30 +674,22 @@ impl PNGReconstructor {
             }
         }
 
-        self.cur_scanline_cursor = self.scanline_bufs[1].as_mut_ptr();
-        unsafe { self.cur_scanline_end = self.cur_scanline_cursor.add(self.cur_consumable_bytes) }
+        let cur_scanline_cursor = self.scanline_bufs[1].as_mut_ptr();
+        let cur_scanline_end = unsafe { cur_scanline_cursor.add(self.cur_consumable_bytes) } as *const u8;
 
-        Ok(())
+        Ok((cur_scanline_cursor, cur_scanline_end))
     }
 
     #[inline(always)]
-    fn consume_decoded_byte(&mut self, png_image: &mut PNGImage, byte: u8) -> Result<(), DecodingError> {
-        // if self.y == 0 {
-        //     println!("byte: {byte}");
-        // }
-
-        // self.scanline_bufs[1][self.cur_scanline_cursor] = byte;
-        if unsafe {
-            // debug_assert!(self.cur_scanline_cursor < self.scanline_bufs[1].len());
-            // *self.scanline_bufs[1].get_unchecked_mut(self.cur_scanline_cursor) = byte;
-            
-            *self.cur_scanline_cursor = byte;
-            self.cur_scanline_cursor = self.cur_scanline_cursor.add(1);
-            self.cur_scanline_cursor != self.cur_scanline_end // if self.cur_scanline_cursor != self.cur_consumable_bytes { ... }
-        } {
-            Ok(()) // fast path
+    fn consume_decoded_byte(&mut self, png_image: &mut PNGImage, byte: u8, cur_scanline_cursor: *mut u8, cur_scanline_end: *const u8) -> Result<(*mut u8, *const u8), DecodingError> {
+        let cur_scanline_cursor = unsafe {
+            *cur_scanline_cursor = byte;
+            cur_scanline_cursor.add(1)
+        };
+        if cur_scanline_cursor as *const u8 == cur_scanline_end {
+            self.process_scanline(png_image)
         } else {
-            self.process_scanline(png_image) // slow path
+            Ok((cur_scanline_cursor, cur_scanline_end))
         }
     }
 }
@@ -1034,8 +1024,12 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
         };
     let scanline_pixels = (png_image.image.w + STEP_X[reconstructor.pass_id] - START_X[reconstructor.pass_id] - 1) / STEP_X[reconstructor.pass_id];
     reconstructor.cur_consumable_bytes = (scanline_pixels as usize * png_channels * png_image.image.depth as usize + 7) / 8 + 1;
-    reconstructor.cur_scanline_cursor = reconstructor.scanline_bufs[1].as_mut_ptr();
-    unsafe { reconstructor.cur_scanline_end = reconstructor.cur_scanline_cursor.add(reconstructor.cur_consumable_bytes) }
+    // let mut cur_scanline_cursor = reconstructor.cur_scanline_cursor;
+    // let mut cur_scanline_end = reconstructor.cur_scanline_end;
+    let mut cur_scanline_cursor = reconstructor.scanline_bufs[1].as_mut_ptr();
+    let mut cur_scanline_end = unsafe { cur_scanline_cursor.add(reconstructor.cur_consumable_bytes) } as *const u8;
+    // reconstructor.cur_scanline_cursor = reconstructor.scanline_bufs[1].as_mut_ptr();
+    // unsafe { reconstructor.cur_scanline_end = reconstructor.cur_scanline_cursor.add(reconstructor.cur_consumable_bytes) }
 
     bs.ensure(stream)?;
     let cmf = bs.read(8)?;
@@ -1057,6 +1051,9 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
     let mut dec_cursor = 0;
     let mut huff_lit_len = HuffmanTables::new();
     let mut huff_dist = HuffmanTables::new();
+    // let mut d1 = 0;
+    // let mut dnoover = 0;
+    // let mut dtotal = 0;
     loop {
         bs.ensure(stream)?;
         let header = bs.read(3)?;
@@ -1109,9 +1106,10 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                     bs.skip(len)?;
                     if sym < 256 {
                         let byte = sym as u8;
-                        reconstructor.consume_decoded_byte(png_image, byte)?;
+                        (cur_scanline_cursor, cur_scanline_end) = reconstructor.consume_decoded_byte(png_image, byte, cur_scanline_cursor, cur_scanline_end)?;
                         dec_buf[dec_cursor & (window_size - 1)] = byte;
                         dec_cursor += 1;
+                        dec_cursor &= window_size - 1;
                         // println!("lit {sym}");
                     } else if sym == 256 { // end of block
                         // println!("EOB");
@@ -1124,7 +1122,7 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                             if sym < 265 {
                                 sym - 254
                             } else if sym == 285 {
-                                258
+                                258 // max
                             } else {
                                 let extra_bits = (sym - 261) / 4; // 1..5 bits
                                 let len = bs.read(extra_bits as u32)? as u16;
@@ -1146,46 +1144,42 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                             };
                         let mut p = (dec_cursor + window_size - dist) & (window_size - 1);
 
+                        // if dist == 1 {
+                        //     d1 += 1;
+                        // }
+                        // if dist >= len as usize {
+                        //     dnoover += 1;
+                        // }
+                        // dtotal += 1;
                         // println!("len {len} dist {dist}");
 
                         // if (dec_cursor + len as usize) <= p && (p + len as usize) < window_size {
                         //     let (dst, src) = dec_buf.split_at_mut(p);
                         //     dst[dec_cursor..dec_cursor + len as usize].copy_from_slice(&src[0..len as usize]);
                         //     for byte in &src[0..len as usize] {
-                        //         reconstructor.consume_decoded_byte(png_image, *byte)?;
+                        //         reconstructor.consume_decoded_byte(png_image, *byte, &mut cur_scanline_cursor, &mut cur_scanline_end)?;
                         //     }
                         //     dec_cursor += len as usize;
                         // } else if (p + len as usize) <= dec_cursor && (dec_cursor + len as usize) < window_size {
                         //     let (src, dst) = dec_buf.split_at_mut(dec_cursor);
                         //     dst[0..len as usize].copy_from_slice(&src[p..p + len as usize]);
                         //     for byte in &dst[0..len as usize] {
-                        //         reconstructor.consume_decoded_byte(png_image, *byte)?;
+                        //         reconstructor.consume_decoded_byte(png_image, *byte, &mut cur_scanline_cursor, &mut cur_scanline_end)?;
                         //     }
                         //     dec_cursor += len as usize;
                         // } else {
                         // slow path
-                        let end = ((dec_cursor + len as usize - 1) & (window_size - 1)) + 1;
-                        let mut cur_scanline_cursor = reconstructor.cur_scanline_cursor;
-                        let mut cur_scanline_end = reconstructor.cur_scanline_end;
+                        // let end = ((dec_cursor + len as usize - 1) & (window_size - 1)) + 1;
+                        let end = (dec_cursor + len as usize) & (window_size - 1);
                         while dec_cursor != end {
-                            p &= window_size - 1;
                             let byte = dec_buf[p];
-                            dec_cursor &= window_size - 1;
                             dec_buf[dec_cursor] = byte;
                             dec_cursor += 1;
+                            dec_cursor &= window_size - 1;
                             p += 1;
-                            unsafe {
-                                *cur_scanline_cursor = byte;
-                                cur_scanline_cursor = cur_scanline_cursor.add(1);
-                            }
-                            if cur_scanline_cursor == cur_scanline_end {
-                                reconstructor.process_scanline(png_image)?;
-                                cur_scanline_cursor = reconstructor.cur_scanline_cursor;
-                                cur_scanline_end = reconstructor.cur_scanline_end;
-                            }
+                            p &= window_size - 1;
+                            (cur_scanline_cursor, cur_scanline_end) = reconstructor.consume_decoded_byte(png_image, byte, cur_scanline_cursor, cur_scanline_end)?;
                         }
-                        reconstructor.cur_scanline_cursor = cur_scanline_cursor;
-                        // }
                     }
                 }
             },
@@ -1201,7 +1195,7 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                 while len > 0 {
                     bs.ensure(stream)?;
                     let byte = bs.read(8)? as u8;
-                    reconstructor.consume_decoded_byte(png_image, byte)?;
+                    (cur_scanline_cursor, cur_scanline_end) = reconstructor.consume_decoded_byte(png_image, byte, cur_scanline_cursor, cur_scanline_end)?;
                     len -= 1;
                 }
             }
@@ -1210,6 +1204,7 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
             break;
         }
     }
+    // println!("d1: {:.2}%, no_overlap: {:.2}%", d1 as f64 * 100f64 / dtotal as f64, dnoover as f64 * 100f64 / dtotal as f64);
 
     // skip 4 bytes of zlib's ADLER32 checksum
     let skip_bits = 32 + bs.bits_left % 8; // ignore bs padding bits in the last byte
@@ -1356,7 +1351,7 @@ pub fn decode(buf: &[u8]) -> Result<PNGImage, DecodingError> {
             b"IDAT" => decode_idat(&mut stream, len as u32, &mut png_image)?,
             b"IEND" => break,
             _ => {
-                println!("skipping {}", String::from_utf8_lossy(&chunk_name));
+                // println!("skipping {}", String::from_utf8_lossy(&chunk_name));
                 chunk_stream.skip(len)?;
             }
         }
