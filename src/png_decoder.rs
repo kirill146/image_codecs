@@ -1118,7 +1118,7 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                         if sym > 285 {
                             return Err(DecodingError::MalformedImage);
                         }
-                        let len =
+                        let mut len =
                             if sym < 265 {
                                 sym - 254
                             } else if sym == 285 {
@@ -1172,13 +1172,30 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                         // let end = ((dec_cursor + len as usize - 1) & (window_size - 1)) + 1;
                         let end = (dec_cursor + len as usize) & (window_size - 1);
                         while dec_cursor != end {
-                            let byte = dec_buf[p];
-                            dec_buf[dec_cursor] = byte;
-                            dec_cursor += 1;
-                            dec_cursor &= window_size - 1;
-                            p += 1;
-                            p &= window_size - 1;
-                            (cur_scanline_cursor, cur_scanline_end) = reconstructor.consume_decoded_byte(png_image, byte, cur_scanline_cursor, cur_scanline_end)?;
+                            let bytes_left = unsafe { cur_scanline_end.offset_from(cur_scanline_cursor) } as usize;
+                            let cnt = std::cmp::min(len as usize, bytes_left);
+                            // let to = std::cmp::min(unsafe { cur_scanline_cursor.add(len as usize) as *const u8 }, cur_scanline_end);
+                            // let n = unsafe { to.offset_from(cur_scanline_cursor) } as u16;
+                            // while cur_scanline_cursor as *const u8 != to {
+                            // while out_cursor < cnt {
+                            for out_cursor in 0..cnt {
+                                p &= window_size - 1;
+                                let byte = dec_buf[p];
+                                dec_buf[dec_cursor] = byte;
+                                dec_cursor += 1;
+                                dec_cursor &= window_size - 1;
+                                p += 1;
+                                // (cur_scanline_cursor, cur_scanline_end) = reconstructor.consume_decoded_byte(png_image, byte, cur_scanline_cursor, cur_scanline_end)?;
+                                unsafe {
+                                    *cur_scanline_cursor.add(out_cursor) = byte;
+                                };
+                            }
+                            if cnt == bytes_left {
+                                (cur_scanline_cursor, cur_scanline_end) = reconstructor.process_scanline(png_image)?;
+                                len -= cnt as u16;
+                            } else {
+                                cur_scanline_cursor = unsafe { cur_scanline_cursor.add(cnt) };
+                            }
                         }
                     }
                 }
