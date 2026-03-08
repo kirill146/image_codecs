@@ -708,8 +708,10 @@ impl BitStream {
     fn ensure_inside_chunk(&mut self, datastream: &mut PNGDatastream, req_bytes: u32) {
         let available_bytes = req_bytes;
 
-        let slice: [u8; 8] = datastream.buf[datastream.cursor..datastream.cursor + 8].try_into().unwrap();
+        let data = unsafe { *(datastream.buf.as_ptr().add(datastream.cursor) as *const u64) };
+        // let slice: [u8; 8] = datastream.buf[datastream.cursor..datastream.cursor + 8].try_into().unwrap();
         // let slice: [u8; 8] = datastream.buf[datastream.cursor + available_bytes as usize - 8..datastream.cursor + available_bytes as usize].try_into().unwrap();
+        // let data = u64::from_le_bytes(slice);
         // let mask = (1 << (available_bytes * 8)) - 1;
         // let mask = if available_bytes >= 8 { 0xffffffffffffffff } else { (1 << (available_bytes * 8)) - 1 };
         let mask =
@@ -718,10 +720,10 @@ impl BitStream {
             } else {
                 0xffffffffffffffff >> (64 - available_bytes * 8)
             };
-        let buf_update = (u64::from_le_bytes(slice) & mask) << self.bits_left;
+        let buf_update = (data & mask) << self.bits_left;
         self.buf |= buf_update;
         self.bits_left += available_bytes * 8;
-        datastream.update_crc(&slice[0..available_bytes as usize]);
+        datastream.update_crc(&data.to_le_bytes());
 
         datastream.cursor += available_bytes as usize;
 
@@ -767,12 +769,15 @@ impl BitStream {
         }
     }
 
+    #[target_feature(enable = "bmi2")]
     fn read(&mut self, count: u32) -> Result<u64, DecodingError> {
         if self.bits_left < count {
             Err(DecodingError::MalformedImage)
         } else {
             self.bits_left -= count;
-            let res = self.buf & ((1 << count) - 1);
+            let res = self.buf & ((1 << count) - 1); // generates BZHI instruction with enabled bmi2
+            // let res = self.buf & !(!0u64 << count);
+            // let res = _bzhi_u64(self.buf, count);
             self.buf >>= count;
             Ok(res)
         }
@@ -967,6 +972,7 @@ fn unpack_sym_len(packed: u16) -> (u16, u8) {
     (packed & 0x1ff, (packed >> 9) as u8)
 }
 
+#[target_feature(enable = "bmi2")]
 fn decode_cls<const N_MAX: usize, const N: u32>(bs: &mut BitStream, stream: &mut PNGDatastream, huff: &[u16], max_symbol: u32) -> Result<[u8; N_MAX], DecodingError> {
     // N_MAX is 286 (or maybe 288) or 32
     let mut cls: [u8; N_MAX] = [0; N_MAX];
@@ -998,6 +1004,7 @@ fn decode_cls<const N_MAX: usize, const N: u32>(bs: &mut BitStream, stream: &mut
 }
 
 #[inline(never)]
+#[target_feature(enable = "bmi2")]
 fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mut PNGImage) -> Result<(), DecodingError> {
     use std::cmp::max;
     let sz = png_image.image.w as usize * png_image.image.h as usize * png_image.image.channels as usize
@@ -1365,7 +1372,7 @@ pub fn decode(buf: &[u8]) -> Result<PNGImage, DecodingError> {
             b"tRNS" => decode_trns(&mut chunk_stream, &mut png_image)?,
             b"pHYs" => decode_phys(&mut chunk_stream)?,
             b"gAMA" => decode_gama(&mut chunk_stream, &mut png_image)?,
-            b"IDAT" => decode_idat(&mut stream, len as u32, &mut png_image)?,
+            b"IDAT" => unsafe { decode_idat(&mut stream, len as u32, &mut png_image) }?,
             b"IEND" => break,
             _ => {
                 // println!("skipping {}", String::from_utf8_lossy(&chunk_name));
