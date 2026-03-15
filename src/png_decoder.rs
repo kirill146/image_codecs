@@ -708,7 +708,7 @@ impl BitStream {
     fn ensure_inside_chunk(&mut self, datastream: &mut PNGDatastream, req_bytes: u32) {
         let available_bytes = req_bytes;
 
-        let data = unsafe { *(datastream.buf.as_ptr().add(datastream.cursor) as *const u64) };
+        let data = unsafe { (datastream.buf.as_ptr().add(datastream.cursor) as *const u64).read_unaligned() };
         // let slice: [u8; 8] = datastream.buf[datastream.cursor..datastream.cursor + 8].try_into().unwrap();
         // let slice: [u8; 8] = datastream.buf[datastream.cursor + available_bytes as usize - 8..datastream.cursor + available_bytes as usize].try_into().unwrap();
         // let data = u64::from_le_bytes(slice);
