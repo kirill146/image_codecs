@@ -30,6 +30,7 @@ pub fn read_all_images(root: &str, extension: &str) -> Vec<(PathBuf, Vec<u8>)> {
 
 pub fn test_decoder(image_type: &str) {
     let root = env::var("TEST_IMAGES_ROOT").expect("TEST_IMAGES_ROOT env var not found");
+    println!("Scanning {root} for {image_type}s");
     let imgs = read_all_images(&root, image_type);
     assert_ne!(imgs.len(), 0);
 

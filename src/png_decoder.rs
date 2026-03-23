@@ -972,31 +972,41 @@ fn unpack_sym_len(packed: u16) -> (u16, u8) {
     (packed & 0x1ff, (packed >> 9) as u8)
 }
 
+const MAX_HLIT: usize = 286;
+const MAX_HDIST: usize = 32;
+const CLS_MAX: usize = (MAX_HLIT + 257) + (MAX_HDIST + 1);
+
 #[target_feature(enable = "bmi2")]
-fn decode_cls<const N_MAX: usize, const N: u32>(bs: &mut BitStream, stream: &mut PNGDatastream, huff: &[u16], max_symbol: u32) -> Result<[u8; N_MAX], DecodingError> {
-    // N_MAX is 286 (or maybe 288) or 32
-    let mut cls: [u8; N_MAX] = [0; N_MAX];
-    const OFFSETS: [u32; 3] = [3, 3, 11];
+fn decode_cls(bs: &mut BitStream, stream: &mut PNGDatastream, huff: &[u16], max_symbol: usize) -> Result<[u8; CLS_MAX], DecodingError> {
+    let mut cls: [u8; CLS_MAX] = [0; CLS_MAX];
+    const OFFSETS: [usize; 3] = [3, 3, 11];
     const EXTRA_BITS: [u32; 3] = [2, 3, 7];
-    let mut sym: u32 = 0;
-    while sym < max_symbol {
+    let mut i: usize = 0;
+    while i < max_symbol {
         bs.ensure(stream)?;
-        let code = bs.peek(N - 1); // TODO: skip code_len bits
+        let code = bs.peek(7);
         let (cl, len) = unpack_sym_len(huff[code as usize]);
         bs.skip(len)?;
-        if cl >= 16 {
+        if cl <= 15 {
+            cls[i as usize] = cl as u8;
+            i += 1;
+        } else {
             let idx = cl as usize - 16;
             let offset = OFFSETS[idx];
             let extra_bits = EXTRA_BITS[idx];
-            let reps = bs.read(extra_bits)? as u32 + offset;
-            let till = sym + reps;
-            while sym != till {
-                cls[sym as usize] = if cl == 16 { cls[sym as usize - 1] } else { 0 };
-                sym += 1;
+            let reps = bs.read(extra_bits)? as usize + offset;
+            let till = i + reps;
+            let val =
+                if cl == 16 {
+                    if i == 0 {
+                        return Err(DecodingError::MalformedImage);
+                    }
+                    cls[i - 1]
+                } else { 0 };
+            while i != till {
+                cls[i] = val;
+                i += 1;
             }
-        } else {
-            cls[sym as usize] = cl as u8;
-            sym += 1;
         }
     }
 
@@ -1069,8 +1079,8 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
         match btype {
             3 => return Err(DecodingError::MalformedImage),
             1 | 2 => {
-                let mut cls_dist: [u8; 32] = [5; 32];
-                let cls_lit_len = if btype == 2 {
+                // let mut cls_dist: [u8; 32] = [5; 32];
+                let (cls_all, n_hlit, n_hdist) = if btype == 2 {
                     // parse literal/length codes
                     bs.ensure(stream)?;
                     let hlit = bs.read(5)?;
@@ -1086,19 +1096,24 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
                     }
 
                     let huff: [u16; 128] = build_huffman_lut::<8, 128>(&cls_of_cls);
-                    let cls_lit_len = decode_cls::<288, 8>(&mut bs, stream, &huff, 257 + hlit as u32)?;
-                    cls_dist = decode_cls::<32, 8>(&mut bs, stream, &huff, 1 + hdist as u32)?;
-                    cls_lit_len
+                    let n_hlit = hlit as usize + 257;
+                    let n_hdist = hdist as usize + 1;
+                    let cls_all = decode_cls(&mut bs, stream, &huff, n_hlit + n_hdist)?;
+                    (cls_all, n_hlit, n_hdist)
                 } else {
-                    core::array::from_fn(|i|{
+                    let cls_all = core::array::from_fn(|i| {
                         match i {
                             _ if i <= 143 => 8,
                             _ if i <= 255 => 9,
                             _ if i <= 279 => 7,
-                            _ => 8,
+                            _ if i <= 287 => 8,
+                            _ => 5,
                         }
-                    })
+                    });
+                    (cls_all, 288, 32)
                 };
+                let cls_lit_len = &cls_all[..n_hlit];
+                let cls_dist = &cls_all[n_hlit..n_hlit + n_hdist];
 
                 huff_lit_len.update(&cls_lit_len);
                 huff_dist.update(&cls_dist);
