@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
 use std::io::Cursor;
-use std::cmp::max;
 use std::env;
 use std::fs;
 
@@ -67,7 +66,7 @@ pub fn test_decoder(image_type: &str) {
                 }
                 // println!("decoded: w={}, h={}, channels={}", image.w, image.h, image.channels);
                 assert!(image.channels > 0);
-                let sz = image.w as usize * image.h as usize * image.channels as usize * max((image.depth / 8) as usize, 1);
+                let sz = image.w as usize * image.h as usize * image.channels as usize * image.depth as usize / 8;
                 assert_eq!(image.buf.len(), sz);
 
                 let mut image_reader = ImageReader::new(Cursor::new(bytes));

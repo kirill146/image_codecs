@@ -45,6 +45,7 @@ const CRC_TABLE: [u32; 256] = [
 
 pub struct PNGImage {
     pub image: Image,
+    pub depth: u8,
     palette: Option<Palette>,
     trns_alpha: Option<[u16; 3]>,
     color_type: u8,
@@ -556,13 +557,13 @@ impl PNGReconstructor {
             };
         // println!("filter: {}", byte);
         
-        let bpp_out = (png_image.image.channels * max(png_image.image.depth, 8) as u32 / 8) as usize; // bytes per pixel
-        let bpp_in = if png_image.image.depth < 8 { 1 } else { bpp_out };
-        let bpc = (png_image.image.depth / 8) as usize; // bytes per channel
+        let bpp_out = (png_image.image.channels * png_image.image.depth as u32 / 8) as usize; // bytes per pixel
+        let bpp_in = if png_image.depth < 8 { 1 } else { bpp_out };
+        let bpc = (png_image.depth / 8) as usize; // bytes per channel
 
         let (prev, cur) = self.scanline_bufs.split_at_mut(1);
         let (prev, cur, out) =
-            if png_image.palette.is_none() && png_image.image.depth >= 8 && STEP_X[self.pass_id] == 1 && png_image.trns_alpha.is_none() {
+            if png_image.palette.is_none() && png_image.depth >= 8 && STEP_X[self.pass_id] == 1 && png_image.trns_alpha.is_none() {
                 let idx = self.y as usize * png_image.image.w as usize * bpp_out as usize;
                 let (img_l, img_r) = png_image.image.buf.split_at_mut(idx);
                 let prev =
@@ -595,8 +596,8 @@ impl PNGReconstructor {
             let mut idx = 0;
             for i in 1..self.cur_consumable_bytes {
                 let byte = self.scanline_bufs[1][i];
-                for j in (0..8).step_by(png_image.image.depth as usize) {
-                    let idx_in_palette = ((byte >> (8 - png_image.image.depth - j)) & (((1 as u32) << png_image.image.depth) - 1) as u8) as usize;
+                for j in (0..8).step_by(png_image.depth as usize) {
+                    let idx_in_palette = ((byte >> (8 - png_image.depth - j)) & (((1 as u32) << png_image.depth) - 1) as u8) as usize;
                     for c in 0..png_image.image.channels {
                         png_image.image.buf[base_idx + idx + c as usize] = palette.values[c as usize][idx_in_palette];
                     }
@@ -607,13 +608,13 @@ impl PNGReconstructor {
                 }
             }
         } else { // no palette
-            if png_image.image.depth < 8 {
-                let max_val = (1 << png_image.image.depth) - 1;
+            if png_image.depth < 8 {
+                let max_val = (1 << png_image.depth) - 1;
                 let base_idx = (self.y as usize * png_image.image.w as usize + START_X[self.pass_id] as usize) * bpp_out;
                 let mut idx = 0;
                 for i in 1..self.cur_consumable_bytes {
                     let byte = self.scanline_bufs[1][i];
-                    for j in (0..8).step_by(png_image.image.depth as usize).rev() {
+                    for j in (0..8).step_by(png_image.depth as usize).rev() {
                         let val = byte >> j & max_val;
                         png_image.image.buf[base_idx + idx] = val * (255 / max_val) as u8;
                         if let Some(trns_alpha) = png_image.trns_alpha {
@@ -637,7 +638,7 @@ impl PNGReconstructor {
                     }
                     if let Some(trns_alpha) = png_image.trns_alpha {
                         let trns_alpha: [u8; 6] =
-                            if png_image.image.depth == 8 {
+                            if png_image.depth == 8 {
                                 std::array::from_fn(|i| if i < 3 { trns_alpha[i] as u8 } else { 0 })
                             } else { // depth == 16
                                 std::array::from_fn(|i| (trns_alpha[i / 2] >> (i % 2 * 8)) as u8)
@@ -669,7 +670,7 @@ impl PNGReconstructor {
             }
             if self.pass_id < 8 && self.y == START_Y[self.pass_id] {
                 let scanline_pixels = (png_image.image.w + STEP_X[self.pass_id] - START_X[self.pass_id] - 1) / STEP_X[self.pass_id];
-                self.cur_consumable_bytes = (scanline_pixels as usize * png_channels * png_image.image.depth as usize + 7) / 8 + 1;
+                self.cur_consumable_bytes = (scanline_pixels as usize * png_channels * png_image.depth as usize + 7) / 8 + 1;
                 self.scanline_bufs[0][0..self.cur_consumable_bytes].fill(0);
             }
         }
@@ -810,11 +811,11 @@ fn decode_ihdr(stream: &mut PNGDatastream, png_image: &mut PNGImage) -> Result<(
     }
     // println!("{w} x {h}");
 
-    png_image.image.depth = stream.read_u8()? as u8;
-    if !([1, 2, 4, 8, 16] as [u8; 5]).contains(&png_image.image.depth) {
+    png_image.depth = stream.read_u8()? as u8;
+    if !([1, 2, 4, 8, 16] as [u8; 5]).contains(&png_image.depth) {
         return Err(DecodingError::MalformedImage);
     }
-    // if png_image.image.depth != 8 && png_image.image.depth != 16 {
+    // if png_image.depth != 8 && png_image.depth != 16 {
     //     println!("depth == {}", png_image.image.depth);
     // }
 
@@ -830,9 +831,9 @@ fn decode_ihdr(stream: &mut PNGDatastream, png_image: &mut PNGImage) -> Result<(
     // println!("chans: {}", png_image.image.channels);
 
     // check allowed combinations of color_type and depth
-    if png_image.color_type == 0 && !([1, 2, 4, 8, 16] as [u8; 5]).contains(&png_image.image.depth)
-        || png_image.color_type == 3 && !([1, 2, 4, 8] as [u8; 4]).contains(&png_image.image.depth)
-        || png_image.color_type != 0 && png_image.color_type != 3 && png_image.image.depth != 8 && png_image.image.depth != 16
+    if png_image.color_type == 0 && !([1, 2, 4, 8, 16] as [u8; 5]).contains(&png_image.depth)
+        || png_image.color_type == 3 && !([1, 2, 4, 8] as [u8; 4]).contains(&png_image.depth)
+        || png_image.color_type != 0 && png_image.color_type != 3 && png_image.depth != 8 && png_image.depth != 16
     {
         return Err(DecodingError::MalformedImage);
     }
@@ -859,6 +860,7 @@ fn decode_ihdr(stream: &mut PNGDatastream, png_image: &mut PNGImage) -> Result<(
 
     png_image.image.w = w;
     png_image.image.h = h;
+    png_image.image.depth = max(png_image.depth, 8);
 
     Ok(())
 }
@@ -1016,9 +1018,8 @@ fn decode_cls(bs: &mut BitStream, stream: &mut PNGDatastream, huff: &[u16], max_
 #[inline(never)]
 #[target_feature(enable = "bmi2")]
 fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mut PNGImage) -> Result<(), DecodingError> {
-    use std::cmp::max;
     let sz = png_image.image.w as usize * png_image.image.h as usize * png_image.image.channels as usize
-        * max((png_image.image.depth / 8) as usize, 1);
+        * (png_image.image.depth / 8) as usize;
     png_image.image.buf = vec![0; sz];
     let mut bs = BitStream::new(chunk_bytes_left);
     let mut reconstructor: PNGReconstructor = Default::default();
@@ -1027,9 +1028,9 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
     }
     let bytes_per_scanline = 1 +
         if png_image.color_type != 3 {
-            (png_image.image.depth as usize * png_image.image.channels as usize * png_image.image.w as usize + 7) / 8
+            (png_image.depth as usize * png_image.image.channels as usize * png_image.image.w as usize + 7) / 8
         } else {
-            (png_image.image.depth as usize * png_image.image.w as usize + 7) / 8
+            (png_image.depth as usize * png_image.image.w as usize + 7) / 8
         };
     reconstructor.scanline_bufs = [ vec![0; bytes_per_scanline], vec![0; bytes_per_scanline] ];
 
@@ -1040,7 +1041,7 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
             png_image.image.channels as usize - png_image.trns_alpha.is_some() as usize
         };
     let scanline_pixels = (png_image.image.w + STEP_X[reconstructor.pass_id] - START_X[reconstructor.pass_id] - 1) / STEP_X[reconstructor.pass_id];
-    reconstructor.cur_consumable_bytes = (scanline_pixels as usize * png_channels * png_image.image.depth as usize + 7) / 8 + 1;
+    reconstructor.cur_consumable_bytes = (scanline_pixels as usize * png_channels * png_image.depth as usize + 7) / 8 + 1;
     // let mut cur_scanline_cursor = reconstructor.cur_scanline_cursor;
     // let mut cur_scanline_end = reconstructor.cur_scanline_end;
     let mut cur_scanline_cursor = reconstructor.scanline_bufs[1].as_mut_ptr();
@@ -1254,7 +1255,7 @@ fn decode_idat(stream: &mut PNGDatastream, chunk_bytes_left: u32, png_image: &mu
         stream.consume_crc()?;
     }
 
-    if png_image.image.depth == 16 {
+    if png_image.depth == 16 {
         for i in (0..png_image.image.buf.len()).step_by(2) {
             png_image.image.buf.swap(i, i + 1); // make it little-endian
         }
@@ -1270,7 +1271,7 @@ fn decode_plte(stream: &mut PNGDatastream, png_image: &mut PNGImage) -> Result<(
 
     if png_image.color_type == 3 {
         let palette_len = stream.len() / 3;
-        if palette_len > (1 << png_image.image.depth) {
+        if palette_len > (1 << png_image.depth) {
             return Err(DecodingError::MalformedImage);
         }
 
@@ -1359,6 +1360,7 @@ pub fn decode(buf: &[u8]) -> Result<PNGImage, DecodingError> {
             buf: vec![],
             depth: 0,
         },
+        depth: 0,
         palette: None,
         trns_alpha: None,
         color_type: 0,
