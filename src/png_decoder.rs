@@ -251,7 +251,7 @@ impl<'a> PNGDatastream<'a> {
         let crc = self.crc ^ 0xffffffff;
         let crc_check = self.read_u32_unchecked()?;
         if CHECK_CRC && crc != crc_check {
-            // println!("{:08x} != {:08x}", crc, crc_check);
+            // println!("crc check failed: computed {:08x} != decoded {:08x}", crc, crc_check);
             Err(DecodingError::MalformedImage)
         } else {
             Ok(())
@@ -723,7 +723,7 @@ impl BitStream {
         let buf_update = (data & mask) << self.bits_left;
         self.buf |= buf_update;
         self.bits_left += available_bytes * 8;
-        datastream.update_crc(&data.to_le_bytes());
+        datastream.update_crc(&data.to_le_bytes()[0..available_bytes as usize]);
 
         datastream.cursor += available_bytes as usize;
 
