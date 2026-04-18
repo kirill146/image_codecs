@@ -27,6 +27,51 @@ pub fn read_all_images(root: &str, extension: &str) -> Vec<(PathBuf, Vec<u8>)> {
     .collect()
 }
 
+fn reinterpret(v: Vec<u16>) -> Vec<u8> {
+    let len = v.len() * 2;
+    let cap = v.capacity() * 2;
+    let ptr = v.as_ptr() as *mut u8;
+
+    std::mem::forget(v);
+
+    unsafe { Vec::from_raw_parts(ptr, len, cap) }
+}
+
+fn decode_with_image_rs(bytes: &Vec<u8>, image_type: &str) -> Result<Vec<u8>, image::error::ImageError> {
+    let mut image_reader = ImageReader::new(Cursor::new(bytes));
+    let image_reader =
+        if image_type == "tga" {
+            image_reader.set_format(ImageFormat::Tga);
+            image_reader
+        } else {
+            image_reader.with_guessed_format().expect("Reference decoder failed, can't guess format")
+        };
+
+    let img = image_reader.decode()?;
+    let col = img.color();
+    let vec16: Vec<u16>;
+    let decoded_bytes =
+        match col {
+            ColorType::L8 => img.to_luma8().into_raw(),
+            ColorType::La8 => img.to_luma_alpha8().into_raw(),
+            ColorType::Rgb8 => img.to_rgb8().into_raw(),
+            ColorType::Rgba8 => img.to_rgba8().into_raw(),
+            ColorType::L16 | ColorType::La16 | ColorType::Rgb16 | ColorType::Rgba16 => {
+                match col {
+                    ColorType::L16 => vec16 = img.to_luma16().into_raw(),
+                    ColorType::La16 => vec16 = img.to_luma_alpha16().into_raw(),
+                    ColorType::Rgb16 => vec16 = img.to_rgb16().into_raw(),
+                    ColorType::Rgba16 => vec16 = img.to_rgba16().into_raw(),
+                    _ => panic!("unreachable"),
+                }
+                reinterpret(vec16)
+            }
+            _ => panic!("Unexpected ColorType: {:?}", img.color())
+        };
+
+    Ok(decoded_bytes)
+}
+
 pub fn test_decoder(image_type: &str) {
     let root = env::var("TEST_IMAGES_ROOT").expect("TEST_IMAGES_ROOT env var not found");
     println!("Scanning {root} for {image_type}s");
@@ -36,8 +81,8 @@ pub fn test_decoder(image_type: &str) {
     let mut n_bad = 0;
     let mut n_ok = 0;
     let mut n_skipped = 0;
-    let mut total = Duration::default();
-    let mut total_ref = Duration::default();
+    let mut total_time = Duration::default();
+    let mut total_time_ref = Duration::default();
     let mut total_bytes_decoded = 0;
     let mut total_pixels_decoded = 0;
     for (path, bytes) in imgs {
@@ -58,7 +103,7 @@ pub fn test_decoder(image_type: &str) {
             },
             Err(err) => if !should_fail { panic!("Decoding failed: {:?}", err) },
             Ok(image) => {
-                total += elapsed;
+                total_time += elapsed;
                 total_bytes_decoded += image.buf.len();
                 total_pixels_decoded += image.w as usize * image.h as usize;
                 if should_fail {
@@ -69,60 +114,27 @@ pub fn test_decoder(image_type: &str) {
                 let sz = image.w as usize * image.h as usize * image.channels as usize * image.depth as usize / 8;
                 assert_eq!(image.buf.len(), sz);
 
-                let mut image_reader = ImageReader::new(Cursor::new(bytes));
-                let image_reader =
-                    if image_type == "tga" {
-                        image_reader.set_format(ImageFormat::Tga);
-                        image_reader
-                    } else {
-                        match image_reader.with_guessed_format() {
-                            Err(err) => {
-                                println!("Reference decoder failed, can't guess format: {err}");
-                                n_skipped += 1;
-                                continue;
-                            },
-                            Ok(image_reader) => image_reader
-                        }
-                    };
                 let start = Instant::now();
-                match image_reader.decode() {
+                match decode_with_image_rs(&bytes, image_type) {
                     Err(err) => {
-                        println!("Reference decoder failed: {err}");
+                        println!("Reference decoder failed: {err}, skipping");
                         n_skipped += 1;
+                        continue;
                     },
-                    Ok(img) => {
-                        let vec16: Vec<u16>;
-                        let col = img.color();
-                        let expected_bytes =
-                            match col {
-                                ColorType::L8 => &img.to_luma8().into_raw(),
-                                ColorType::La8 => &img.to_luma_alpha8().into_raw(),
-                                ColorType::Rgb8 => &img.to_rgb8().into_raw(),
-                                ColorType::Rgba8 => &img.to_rgba8().into_raw(),
-                                ColorType::L16 | ColorType::La16 | ColorType::Rgb16 | ColorType::Rgba16 => {
-                                    match col {
-                                        ColorType::L16 => vec16 = img.to_luma16().into_raw(),
-                                        ColorType::La16 => vec16 = img.to_luma_alpha16().into_raw(),
-                                        ColorType::Rgb16 => vec16 = img.to_rgb16().into_raw(),
-                                        ColorType::Rgba16 => vec16 = img.to_rgba16().into_raw(),
-                                        _ => panic!("unreachable"),
-                                    }
-                                    unsafe { vec16.align_to::<u8>().1 }
-                                }
-                                _ => panic!("Unexpected ColorType: {:?}", img.color())
-                            };
+                    Ok(expected_buf) => {
                         let elapsed = start.elapsed();
-                        total_ref += elapsed;
-                        assert!(image.buf.len() == expected_bytes.len());
+                        total_time_ref += elapsed;
 
+                        assert!(image.buf.len() == expected_buf.len());
                         for i in 0..image.buf.len() {
-                            if image.buf[i] != expected_bytes[i] {
-                                println!("our[{i}] != expected[{i}]: {} != {}", image.buf[i], expected_bytes[i]);
+                            if image.buf[i] != expected_buf[i] {
+                                println!("our[{i}] != expected[{i}]: {} != {}", image.buf[i], expected_buf[i]);
                                 break;
                             }
                         }
                         // assert!(image.buf == expected_bytes); // assert_eq prints entire vectors on failure
-                        if image.buf != expected_bytes {
+
+                        if image.buf != expected_buf {
                             println!("BAD: Comparison failed");
                             n_bad += 1;
                         } else {
@@ -134,11 +146,11 @@ pub fn test_decoder(image_type: &str) {
             }
         }
     }
-    let rel_perf = total.as_nanos() * 100 / total_ref.as_nanos();
-    let mb_per_sec = total_bytes_decoded as u64 * 1_000_000_000 / (1024 * 1024 * total.as_nanos() as u64);
-    let mpix_per_sec = total_pixels_decoded as u64 * 1000 / (total.as_nanos() as u64);
+    let rel_perf = total_time.as_nanos() * 100 / total_time_ref.as_nanos();
+    let mb_per_sec = total_bytes_decoded as u64 * 1_000_000_000 / (1024 * 1024 * total_time.as_nanos() as u64);
+    let mpix_per_sec = total_pixels_decoded as u64 * 1000 / (total_time.as_nanos() as u64);
     println!("ok: {n_ok}, bad: {n_bad}, skipped: {n_skipped}");
-    println!("total: {:?}, total_ref: {:?} ({rel_perf}%), {mb_per_sec} Mb/s, {mpix_per_sec} MP/s", total, total_ref);
+    println!("total: {:?}, total_ref: {:?} ({rel_perf}%), {mb_per_sec} Mb/s, {mpix_per_sec} MP/s", total_time, total_time_ref);
     assert_ne!(n_ok, 0);
     assert_eq!(n_bad, 0);
     assert_eq!(n_skipped, 0);
