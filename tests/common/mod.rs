@@ -124,54 +124,58 @@ pub fn test_decoder(image_type: &str) {
         let start = Instant::now();
         let image = Image::new(&bytes); 
         let elapsed = start.elapsed();
-        match image {
+        let image = match image {
             Err(DecodingError::NotImplemented) => {
                 println!("Decoding failed: not implemented. Skipping");
                 n_skipped += 1;
+                continue;
             },
-            Err(err) => if !should_fail { panic!("Decoding failed: {:?}", err) },
-            Ok(image) => {
-                total_time += elapsed;
-                total_bytes_decoded += image.buf.len();
-                total_pixels_decoded += image.w as usize * image.h as usize;
-                if should_fail {
-                    panic!("Should have failed");
+            Err(err) => {
+                if !should_fail {
+                    panic!("Decoding failed: {:?}", err)
                 }
-                // println!("decoded: w={}, h={}, channels={}", image.w, image.h, image.channels);
-                assert!(image.channels > 0);
-                let sz = image.w as usize * image.h as usize * image.channels as usize * image.depth as usize / 8;
-                assert_eq!(image.buf.len(), sz);
+                continue;
+            },
+            Ok(image) => image,
+        };
+        total_time += elapsed;
+        total_bytes_decoded += image.buf.len();
+        total_pixels_decoded += image.w as usize * image.h as usize;
+        if should_fail {
+            panic!("Should have failed");
+        }
+        // println!("decoded: w={}, h={}, channels={}", image.w, image.h, image.channels);
+        assert!(image.channels > 0);
+        let sz = image.w as usize * image.h as usize * image.channels as usize * image.depth as usize / 8;
+        assert_eq!(image.buf.len(), sz);
 
-                let start = Instant::now();
-                match decode_with_png_rs(&bytes) {
-                    Err(err) => {
-                        println!("Reference decoder failed: {err}, skipping");
-                        n_skipped += 1;
-                        continue;
-                    },
-                    Ok(expected_buf) => {
-                        let elapsed = start.elapsed();
-                        total_time_ref += elapsed;
+        let start = Instant::now();
+        let expected_buf = match decode_with_png_rs(&bytes) {
+            Err(err) => {
+                println!("Reference decoder failed: {err}, skipping");
+                n_skipped += 1;
+                continue;
+            },
+            Ok(expected_buf) => expected_buf
+        };
+        let elapsed = start.elapsed();
+        total_time_ref += elapsed;
 
-                        assert_eq!(image.buf.len(), expected_buf.len());
-                        for i in 0..image.buf.len() {
-                            if image.buf[i] != expected_buf[i] {
-                                println!("our[{i}] != expected[{i}]: {} != {}", image.buf[i], expected_buf[i]);
-                                break;
-                            }
-                        }
-                        // assert!(image.buf == expected_bytes); // assert_eq prints entire vectors on failure
-
-                        if image.buf != expected_buf {
-                            println!("BAD: Comparison failed");
-                            n_bad += 1;
-                        } else {
-                            // println!("OK");
-                            n_ok += 1;
-                        }
-                    }
-                }
+        assert_eq!(image.buf.len(), expected_buf.len());
+        for i in 0..image.buf.len() {
+            if image.buf[i] != expected_buf[i] {
+                println!("our[{i}] != expected[{i}]: {} != {}", image.buf[i], expected_buf[i]);
+                break;
             }
+        }
+        // assert!(image.buf == expected_bytes); // assert_eq prints entire vectors on failure
+
+        if image.buf != expected_buf {
+            println!("BAD: Comparison failed");
+            n_bad += 1;
+        } else {
+            // println!("OK");
+            n_ok += 1;
         }
     }
     let rel_perf = total_time.as_nanos() * 100 / total_time_ref.as_nanos();
