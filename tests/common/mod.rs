@@ -1,4 +1,6 @@
 use image::ImageFormat;
+use png::BitDepth;
+use png::Transformations;
 use walkdir::WalkDir;
 use image::ImageReader;
 use image::ColorType;
@@ -27,6 +29,7 @@ pub fn read_all_images(root: &str, extension: &str) -> Vec<(PathBuf, Vec<u8>)> {
     .collect()
 }
 
+#[allow(dead_code)]
 fn reinterpret(v: Vec<u16>) -> Vec<u8> {
     let len = v.len() * 2;
     let cap = v.capacity() * 2;
@@ -37,6 +40,7 @@ fn reinterpret(v: Vec<u16>) -> Vec<u8> {
     unsafe { Vec::from_raw_parts(ptr, len, cap) }
 }
 
+#[allow(dead_code)]
 fn decode_with_image_rs(bytes: &Vec<u8>, image_type: &str) -> Result<Vec<u8>, image::error::ImageError> {
     let mut image_reader = ImageReader::new(Cursor::new(bytes));
     let image_reader =
@@ -72,6 +76,30 @@ fn decode_with_image_rs(bytes: &Vec<u8>, image_type: &str) -> Result<Vec<u8>, im
     Ok(decoded_bytes)
 }
 
+fn decode_with_png_rs(bytes: &Vec<u8>) -> Result<Vec<u8>, png::DecodingError> {
+    let mut options = png::DecodeOptions::default();
+    options.set_ignore_checksums(false);
+    options.set_ignore_iccp_chunk(false);
+    options.set_ignore_text_chunk(false);
+
+    let mut decoder = png::Decoder::new_with_options(Cursor::new(bytes), options);
+    decoder.set_transformations(Transformations::EXPAND);
+    let mut reader = decoder.read_info()?;
+
+    let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut buf)?; // actual decoding
+    assert_eq!(info.buffer_size(), buf.len());
+
+    if info.bit_depth == BitDepth::Sixteen {
+        // PNGs are big endian, so let's fix it:
+        for i in (0..buf.len()).step_by(2) {
+            buf.swap(i, i + 1);
+        }
+    }
+
+    Ok(buf)
+}
+
 pub fn test_decoder(image_type: &str) {
     let root = env::var("TEST_IMAGES_ROOT").expect("TEST_IMAGES_ROOT env var not found");
     println!("Scanning {root} for {image_type}s");
@@ -86,7 +114,7 @@ pub fn test_decoder(image_type: &str) {
     let mut total_bytes_decoded = 0;
     let mut total_pixels_decoded = 0;
     for (path, bytes) in imgs {
-        // if path.file_name().unwrap().display().to_string() != "spnza_bricks_a_spec.tga" {
+        // if path.file_name().unwrap().display().to_string() != "WaterBottle_Occlusion.png" {
         //     n_skipped += 1;
         //     continue;
         // }
@@ -115,7 +143,7 @@ pub fn test_decoder(image_type: &str) {
                 assert_eq!(image.buf.len(), sz);
 
                 let start = Instant::now();
-                match decode_with_image_rs(&bytes, image_type) {
+                match decode_with_png_rs(&bytes) {
                     Err(err) => {
                         println!("Reference decoder failed: {err}, skipping");
                         n_skipped += 1;
@@ -125,7 +153,7 @@ pub fn test_decoder(image_type: &str) {
                         let elapsed = start.elapsed();
                         total_time_ref += elapsed;
 
-                        assert!(image.buf.len() == expected_buf.len());
+                        assert_eq!(image.buf.len(), expected_buf.len());
                         for i in 0..image.buf.len() {
                             if image.buf[i] != expected_buf[i] {
                                 println!("our[{i}] != expected[{i}]: {} != {}", image.buf[i], expected_buf[i]);
