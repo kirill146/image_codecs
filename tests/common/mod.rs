@@ -4,6 +4,10 @@ use png::Transformations;
 use walkdir::WalkDir;
 use image::ImageReader;
 use image::ColorType;
+use zune_png::PngDecoder;
+use zune_png::zune_core::options::DecoderOptions;
+use zune_png::zune_core::result::DecodingResult;
+use zune_png::zune_core::bytestream::ZCursor;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
@@ -41,7 +45,7 @@ fn reinterpret(v: Vec<u16>) -> Vec<u8> {
 }
 
 #[allow(dead_code)]
-fn decode_with_image_rs(bytes: &Vec<u8>, image_type: &str) -> Result<Vec<u8>, image::error::ImageError> {
+fn decode_with_image_rs(bytes: &[u8], image_type: &str) -> Result<Vec<u8>, image::error::ImageError> {
     let mut image_reader = ImageReader::new(Cursor::new(bytes));
     let image_reader =
         if image_type == "tga" {
@@ -76,7 +80,8 @@ fn decode_with_image_rs(bytes: &Vec<u8>, image_type: &str) -> Result<Vec<u8>, im
     Ok(decoded_bytes)
 }
 
-fn decode_with_png_rs(bytes: &Vec<u8>) -> Result<Vec<u8>, png::DecodingError> {
+#[allow(dead_code)]
+fn decode_with_png_rs(bytes: &[u8]) -> Result<Vec<u8>, png::DecodingError> {
     let mut options = png::DecodeOptions::default();
     options.set_ignore_checksums(false);
     options.set_ignore_iccp_chunk(false);
@@ -100,6 +105,21 @@ fn decode_with_png_rs(bytes: &Vec<u8>) -> Result<Vec<u8>, png::DecodingError> {
     Ok(buf)
 }
 
+#[allow(dead_code)]
+fn decode_with_zune_png(bytes: &[u8]) -> Result<Vec<u8>, zune_png::error::PngDecodeErrors> {
+    let cursor = ZCursor::new(bytes);
+    let options = DecoderOptions::new_fast();
+    let res = PngDecoder::new_with_options(cursor, options).decode()?;
+
+    let decoded_bytes = match res {
+        DecodingResult::U8(u8_vec) => u8_vec,
+        DecodingResult::U16(u16_vec) => reinterpret(u16_vec),
+        _ => unreachable!("Should be unreachable"),
+    };
+
+    Ok(decoded_bytes)
+}
+
 pub fn test_decoder(image_type: &str) {
     let root = env::var("TEST_IMAGES_ROOT").expect("TEST_IMAGES_ROOT env var not found");
     println!("Scanning {root} for {image_type}s");
@@ -121,9 +141,11 @@ pub fn test_decoder(image_type: &str) {
         let should_fail = path.to_string_lossy().to_lowercase().contains("pngsuite")
             && path.file_name().unwrap().to_string_lossy().starts_with('x');
         println!("decoding {}", path.strip_prefix(&root).unwrap().display());
+
         let start = Instant::now();
         let image = Image::new(&bytes); 
         let elapsed = start.elapsed();
+
         let image = match image {
             Err(DecodingError::NotImplemented) => {
                 println!("Decoding failed: not implemented. Skipping");
@@ -138,6 +160,7 @@ pub fn test_decoder(image_type: &str) {
             },
             Ok(image) => image,
         };
+
         total_time += elapsed;
         total_bytes_decoded += image.buf.len();
         total_pixels_decoded += image.w as usize * image.h as usize;
@@ -150,7 +173,7 @@ pub fn test_decoder(image_type: &str) {
         assert_eq!(image.buf.len(), sz);
 
         let start = Instant::now();
-        let expected_buf = match decode_with_png_rs(&bytes) {
+        let expected_buf = match decode_with_zune_png(&bytes) {
             Err(err) => {
                 println!("Reference decoder failed: {err}, skipping");
                 n_skipped += 1;
@@ -159,8 +182,8 @@ pub fn test_decoder(image_type: &str) {
             Ok(expected_buf) => expected_buf
         };
         let elapsed = start.elapsed();
-        total_time_ref += elapsed;
 
+        total_time_ref += elapsed;
         assert_eq!(image.buf.len(), expected_buf.len());
         for i in 0..image.buf.len() {
             if image.buf[i] != expected_buf[i] {
