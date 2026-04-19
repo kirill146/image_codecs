@@ -173,6 +173,40 @@ fn decode_with_spng(bytes: &[u8]) -> Result<Vec<u8>, spng::Error> {
     Ok(data)
 }
 
+#[allow(dead_code)]
+#[allow(deprecated)]
+fn decode_with_lodepng(bytes: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut state = lodepng::State::new();
+    state.decoder.ignore_crc = true;
+    state.read_text_chunks(false);
+    state.inspect(bytes)?;
+
+    let colortype =
+        if state.info_png.color.colortype == lodepng::ColorType::PALETTE {
+            if state.info_png.color.has_palette_alpha() {
+                lodepng::ColorType::RGBA
+            } else {
+                lodepng::ColorType::RGB
+            }
+        } else {
+            state.info_png.color.colortype
+        };
+    state.info_raw.set_colortype(colortype);
+    state.info_raw.set_bitdepth(std::cmp::max(state.info_png.color.bitdepth(), 8));
+
+    let image = state.decode(bytes)?; // actual decoding
+    let mut decoded_bytes = image.bytes().to_vec();
+
+    if state.info_raw.bitdepth() == 16 {
+        // PNGs are big endian, so let's fix it:
+        for i in (0..decoded_bytes.len()).step_by(2) {
+            decoded_bytes.swap(i, i + 1);
+        }
+    }
+
+    Ok(decoded_bytes)
+}
+
 pub fn test_decoder(image_type: &str) {
     let root = env::var("TEST_IMAGES_ROOT").expect("TEST_IMAGES_ROOT env var not found");
     println!("Scanning {root} for {image_type}s");
@@ -226,7 +260,11 @@ pub fn test_decoder(image_type: &str) {
         assert_eq!(image.buf.len(), sz);
 
         let start = Instant::now();
-        let expected_buf = match decode_with_spng(&bytes) {
+        // let expected_buf = match decode_with_image_rs(&bytes, image_type) {
+        // let expected_buf = match decode_with_png_rs(&bytes) {
+        // let expected_buf = match decode_with_zune_png(&bytes) {
+        // let expected_buf = match decode_with_spng(&bytes) {
+        let expected_buf = match decode_with_lodepng(&bytes) {
             Err(err) => {
                 println!("Reference decoder failed: {err}, skipping");
                 n_skipped += 1;
