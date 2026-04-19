@@ -816,7 +816,7 @@ fn decode_ihdr(stream: &mut PNGDatastream, png_image: &mut PNGImage) -> Result<(
         return Err(DecodingError::MalformedImage);
     }
     // if png_image.depth != 8 && png_image.depth != 16 {
-    //     println!("depth == {}", png_image.image.depth);
+    //     println!("depth == {}", png_image.depth);
     // }
 
     png_image.color_type = stream.read_u8()?;

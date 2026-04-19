@@ -120,6 +120,59 @@ fn decode_with_zune_png(bytes: &[u8]) -> Result<Vec<u8>, zune_png::error::PngDec
     Ok(decoded_bytes)
 }
 
+#[allow(dead_code)]
+fn decode_with_spng(bytes: &[u8]) -> Result<Vec<u8>, spng::Error> {
+    // let (_out_info, data) = spng::decode(Cursor::new(bytes), spng::Format::Rgba8)?;
+    // Ok(data)
+
+    let mut ctx = spng::raw::RawContext::with_flags(spng::ContextFlags::IGNORE_ADLER32)?;
+    ctx.set_crc_action(spng::CrcAction::Use, spng::CrcAction::Use)?;
+
+    // ctx.set_png_stream(Cursor::new(bytes))?;
+    ctx.set_png_buffer(bytes)?;
+
+    let ihdr = ctx.get_ihdr()?;
+    let out_format =
+        match spng::ColorType::try_from(ihdr.color_type)? {
+            spng::ColorType::G =>
+                if ihdr.bit_depth < 8 {
+                    if ctx.get_trns().is_ok() { spng::Format::Ga8 }
+                    else { spng::Format::G8 }
+                } else {
+                    spng::Format::Png
+                    // if ctx.get_trns().is_ok() { spng::Format::Ga16 }
+                    // else { spng::Format::Png }
+                },
+            spng::ColorType::RGB =>
+                spng::Format::Png,
+                // if ihdr.bit_depth == 8 {
+                //     if ctx.get_trns().is_ok() { spng::Format::Rgba8 }
+                //     else { spng::Format::Rgb8 }
+                // } else {
+                //     if ctx.get_trns().is_ok() { spng::Format::Rgba16 }
+                //     else { spng::Format::Png }
+                // },
+            spng::ColorType::Indexed =>
+                if ctx.get_trns().is_ok() { spng::Format::Rgba8 }
+                else { spng::Format::Rgb8 },
+            spng::ColorType::GA => {
+                spng::Format::Png
+                // if ihdr.bit_depth == 8 { spng::Format::Ga8 }
+                // if ihdr.bit_depth == 8 { spng::Format::Png }
+                // else { spng::Format::Ga16 }
+            },
+            spng::ColorType::RGBA => {
+                spng::Format::Png
+                // if ihdr.bit_depth == 8 { spng::Format::Rgba8 }
+                // else { spng::Format::Png }
+            },
+        };
+    let mut data = vec![0; ctx.decoded_image_size(out_format)?];
+    ctx.decode_image(&mut data, out_format, spng::DecodeFlags::TRANSPARENCY)?;
+
+    Ok(data)
+}
+
 pub fn test_decoder(image_type: &str) {
     let root = env::var("TEST_IMAGES_ROOT").expect("TEST_IMAGES_ROOT env var not found");
     println!("Scanning {root} for {image_type}s");
@@ -173,7 +226,7 @@ pub fn test_decoder(image_type: &str) {
         assert_eq!(image.buf.len(), sz);
 
         let start = Instant::now();
-        let expected_buf = match decode_with_zune_png(&bytes) {
+        let expected_buf = match decode_with_spng(&bytes) {
             Err(err) => {
                 println!("Reference decoder failed: {err}, skipping");
                 n_skipped += 1;

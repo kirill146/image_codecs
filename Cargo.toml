@@ -10,6 +10,7 @@ edition = "2024"
 image = "0.25.9"
 png = "0.18.1"
 zune-png = "0.5.2"
+spng = "0.1.0"
 walkdir = "2"
 
 [profile.release]
